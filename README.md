@@ -1,6 +1,6 @@
 # MyLSM
 
-使用 **Java 21** 分阶段实现 LSM Tree，在亲自实现关键算法的过程中学习存储引擎。当前仅完成环境初始化，尚无 LSM 功能实现。
+使用 **Java 21** 分阶段实现 LSM Tree，由你指挥 AI 逐步实现核心算法，在理解设计、代码与取舍的过程中学习存储引擎。当前仅完成环境初始化，尚无 LSM 功能实现。
 
 ## 环境与构建
 
@@ -56,4 +56,4 @@ openspec archive implement-memtable
 
 默认分支为 `main`，每阶段使用独立主题分支、小步提交。忽略构建产物、IDE 配置与 `data/` 运行数据；本轮不配置远端或推送。
 
-见 [学习路线](docs/roadmap.md) 和 [协作约定](AGENTS.md)。下一步共同设计键值模型和 MemTable API，再由你实现第一组核心操作。
+见 [学习路线](docs/roadmap.md) 和 [协作约定](AGENTS.md)。下一步共同设计键值模型和 MemTable API，再由你指挥 AI 逐步实现第一组核心操作。

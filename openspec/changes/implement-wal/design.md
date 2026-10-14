@@ -2,7 +2,7 @@
 
 动机见 proposal.md。现有 ByteKey 和 Value 不可变，Entry 区分值和 Tombstone；TreeMapMemTable 仅保留每键最新状态且不负责 I/O。WAL 保存操作历史，恢复必须按文件顺序重放，不能用按键排序的 snapshot 代替。
 
-本设计采用前一轮建议作为具体提案；用户已授权启动本阶段，记录布局、大小边界与错误语义仍需在编码前共同审阅，tasks 不将此审阅标成已完成。
+用户在阅读说明后指示实现，本步骤沿用当前提案的记录布局、大小边界与错误语义；每步实现后继续留出讨论空间。
 
 ## Goals / Non-Goals
 
@@ -77,7 +77,11 @@ payload = operation (1) | keyLength (4) | valueLength (4) | key | value
 
 存储入口暂定 `WalStore.open(Path)`、`put(ByteKey, Value)`、`delete(ByteKey)`、`get(ByteKey)` 和 `close()`，实现 AutoCloseable；I/O 问题通过 IOException，非法参数通过 NullPointerException/IllegalArgumentException，已关闭或失败状态通过 IllegalStateException 表达。get 保持 Optional<Entry> 三态，存储内部的 MemTable 不暴露给外部修改。
 
-记录编解码的具体方法签名在下一小步共同确定；文件层用最小可替换 I/O 边界做短写与同步失败注入，不引入 Mock 框架。不会把预期生产环境故障测试完全替换为伪实现测试。
+第一步接口为 `WalCodec.encode(WalRecord): byte[]` 与 `WalCodec.decode(byte[]): WalRecord`，均为静态方法。encode 返回独立数组；null 输入抛出 NullPointerException，载荷超限抛出 IllegalArgumentException。decode 只接收恰好一条完整帧，不修改输入、不保留可变数组引用；null 输入抛出 NullPointerException，不完整前缀或合法长度下的缺失载荷抛出 EOFException，非法长度、额外字节、校验失败及非法结构抛出 IOException。decode 不做尾部修复；识别文件 EOF 与决定截尾由之后的文件扫描层负责。
+
+示例 `PUT(k, A)`：长度字段为 `00 00 00 0b`，载荷为 `01 | 00 00 00 01 | 00 00 00 01 | 6b | 41`，载荷 11 字节、帧 19 字节。`DELETE(k)`：长度字段为 `00 00 00 0a`，载荷为 `02 | 00 00 00 01 | 00 00 00 00 | 6b`，载荷 10 字节、帧 18 字节。校验覆盖长度字段和载荷，中间的 4 字节校验字段不参与计算。
+
+文件层用最小可替换 I/O 边界做短写与同步失败注入，不引入 Mock 框架。不会把预期生产环境故障测试完全替换为伪实现测试。
 
 ## Risks / Trade-offs
 

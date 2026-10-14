@@ -1,6 +1,6 @@
 # MyLSM
 
-使用 **Java 21** 分阶段实现 LSM Tree，由你指挥 AI 逐步实现核心算法，在理解设计、代码与取舍的过程中学习存储引擎。当前已完成环境初始化、不可变字节模型和基于 TreeMap 的 MemTable（put/get/delete/snapshot），已完成阶段 1 的内存 KV 范围；尚无磁盘存储与持久化能力。
+使用 **Java 21** 分阶段实现 LSM Tree，由你指挥 AI 逐步实现核心算法，在理解设计、代码与取舍的过程中学习存储引擎。当前已完成环境初始化、不可变字节模型和基于 TreeMap 的 MemTable（put/get/delete/snapshot），已完成阶段 1 的内存 KV 范围；阶段 2 已实现 WAL 单条记录编解码，尚无磁盘存储与持久化能力。
 
 ## 环境与构建
 
@@ -25,6 +25,7 @@ openspec validate --all --strict --no-interactive
 src/main/java/io/github/flyzz/mylsm/
   model/                             ByteKey、Entry、Value、Tombstone
   memtable/                          MemTable、TreeMapMemTable、MemTableRecord
+  wal/                               WalRecord、WalCodec（单条帧编解码）
 src/test/java/io/github/flyzz/mylsm/  对应子包的 JUnit 测试
 docs/roadmap.md                       学习路线与每阶段节奏
 openspec/config.yaml                  项目背景与规范约定
@@ -58,4 +59,4 @@ openspec archive add-memtable-iteration
 
 默认分支为 `main`，每阶段使用独立主题分支、小步提交。忽略构建产物、IDE 配置与 `data/` 运行数据；本轮不配置远端或推送。
 
-见 [学习路线](docs/roadmap.md) 和 [协作约定](AGENTS.md)。已完成的基础模型见 [ByteKey 学习笔记](docs/byte-key.md) 和 [记录模型学习笔记](docs/entry-model.md)。内存表实现见 [MemTable 学习笔记](docs/memtable.md)。有序遍历及阶段复盘见 [快照学习笔记](docs/memtable-snapshot.md)。下一阶段讨论 WAL。
+见 [学习路线](docs/roadmap.md) 和 [协作约定](AGENTS.md)。已完成的基础模型见 [ByteKey 学习笔记](docs/byte-key.md) 和 [记录模型学习笔记](docs/entry-model.md)。内存表实现见 [MemTable 学习笔记](docs/memtable.md)。有序遍历及阶段复盘见 [快照学习笔记](docs/memtable-snapshot.md)。当前 WAL 第一步见 [编解码学习笔记](docs/wal-codec.md)，文件追加与恢复待后续小步骤实现。

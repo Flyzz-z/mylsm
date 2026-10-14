@@ -1,6 +1,6 @@
 # MyLSM
 
-使用 **Java 21** 分阶段实现 LSM Tree，由你指挥 AI 逐步实现核心算法，在理解设计、代码与取舍的过程中学习存储引擎。当前已完成环境初始化和不可变字节键 `ByteKey`，尚未实现 MemTable 与磁盘存储。
+使用 **Java 21** 分阶段实现 LSM Tree，由你指挥 AI 逐步实现核心算法，在理解设计、代码与取舍的过程中学习存储引擎。当前已完成环境初始化、不可变字节键 `ByteKey` 和记录模型 `Entry`（`Value` / `Tombstone`），尚未实现 MemTable 与磁盘存储。
 
 ## 环境与构建
 
@@ -17,7 +17,7 @@ java -version
 openspec validate --all --strict --no-interactive
 ```
 
-首次构建需要联网下载 Maven 和依赖。Windows 使用 `mvnw.cmd`。JUnit 5 已覆盖 `ByteKey` 的数组隔离、相等、排序和集合行为；构建通过只代表当前已实现范围通过验证。
+首次构建需要联网下载 Maven 和依赖。Windows 使用 `mvnw.cmd`。JUnit 5 已覆盖 `ByteKey` 的数组隔离、相等、排序和集合行为，以及 `Value` 的不可变性、内容相等与删除标记区分；构建通过只代表当前已实现范围通过验证。
 
 ## 目录
 
@@ -56,4 +56,4 @@ openspec archive implement-memtable
 
 默认分支为 `main`，每阶段使用独立主题分支、小步提交。忽略构建产物、IDE 配置与 `data/` 运行数据；本轮不配置远端或推送。
 
-见 [学习路线](docs/roadmap.md) 和 [协作约定](AGENTS.md)。已完成的第一步见 [ByteKey 学习笔记](docs/byte-key.md)。下一步讨论值与删除标记的表示，再逐步设计和实现 MemTable API。
+见 [学习路线](docs/roadmap.md) 和 [协作约定](AGENTS.md)。已完成的基础模型见 [ByteKey 学习笔记](docs/byte-key.md) 和 [记录模型学习笔记](docs/entry-model.md)。下一步讨论 MemTable API 与有序遍历，再逐步实现。

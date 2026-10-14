@@ -1,6 +1,6 @@
 # MyLSM
 
-使用 **Java 21** 分阶段实现 LSM Tree，由你指挥 AI 逐步实现核心算法，在理解设计、代码与取舍的过程中学习存储引擎。当前已完成环境初始化、不可变字节模型和基于 TreeMap 的 MemTable（put/get/delete/snapshot），已完成阶段 1 的内存 KV 范围；阶段 2 已实现 WAL 单条记录编解码，尚无磁盘存储与持久化能力。
+使用 **Java 21** 分阶段实现 LSM Tree，由你指挥 AI 逐步实现核心算法，在理解设计、代码与取舍的过程中学习存储引擎。当前已完成环境初始化、不可变字节模型和基于 TreeMap 的 MemTable（put/get/delete/snapshot），已完成阶段 1 的内存 KV 范围；阶段 2 已实现 WAL 编解码、文件头和同步追加，恢复扫描与 MemTable 组合尚未实现，暂不提供可恢复的持久化 KV 存储。
 
 ## 环境与构建
 
@@ -17,7 +17,7 @@ java -version
 openspec validate --all --strict --no-interactive
 ```
 
-首次构建需要联网下载 Maven 和依赖。Windows 使用 `mvnw.cmd`。JUnit 5 已覆盖 `ByteKey` 的数组隔离、相等、排序和集合行为，以及 `Value` 的不可变性和 MemTable 的写入、查询三态、删除、有序快照及边界行为；构建通过只代表当前已实现范围通过验证。
+首次构建需要联网下载 Maven 和依赖。Windows 使用 `mvnw.cmd`。JUnit 5 已覆盖基础模型与 MemTable 契约、WAL 帧格式与损坏输入，以及文件头、同步追加、短读写和 I/O 失败状态；构建通过只代表当前已实现范围通过验证。
 
 ## 目录
 
@@ -25,7 +25,7 @@ openspec validate --all --strict --no-interactive
 src/main/java/io/github/flyzz/mylsm/
   model/                             ByteKey、Entry、Value、Tombstone
   memtable/                          MemTable、TreeMapMemTable、MemTableRecord
-  wal/                               WalRecord、WalCodec（单条帧编解码）
+  wal/                               WAL 记录、编解码、文件初始化与同步追加
 src/test/java/io/github/flyzz/mylsm/  对应子包的 JUnit 测试
 docs/roadmap.md                       学习路线与每阶段节奏
 openspec/config.yaml                  项目背景与规范约定
@@ -59,4 +59,4 @@ openspec archive add-memtable-iteration
 
 默认分支为 `main`，每阶段使用独立主题分支、小步提交。忽略构建产物、IDE 配置与 `data/` 运行数据；本轮不配置远端或推送。
 
-见 [学习路线](docs/roadmap.md) 和 [协作约定](AGENTS.md)。已完成的基础模型见 [ByteKey 学习笔记](docs/byte-key.md) 和 [记录模型学习笔记](docs/entry-model.md)。内存表实现见 [MemTable 学习笔记](docs/memtable.md)。有序遍历及阶段复盘见 [快照学习笔记](docs/memtable-snapshot.md)。当前 WAL 第一步见 [编解码学习笔记](docs/wal-codec.md)，文件追加与恢复待后续小步骤实现。
+见 [学习路线](docs/roadmap.md) 和 [协作约定](AGENTS.md)。已完成的基础模型见 [ByteKey 学习笔记](docs/byte-key.md) 和 [记录模型学习笔记](docs/entry-model.md)。内存表实现见 [MemTable 学习笔记](docs/memtable.md)。有序遍历及阶段复盘见 [快照学习笔记](docs/memtable-snapshot.md)。当前 WAL 见 [编解码学习笔记](docs/wal-codec.md) 和 [文件写入笔记](docs/wal-writer.md)，恢复扫描与存储组合待后续小步骤实现。

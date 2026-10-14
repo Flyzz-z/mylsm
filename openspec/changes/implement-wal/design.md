@@ -83,6 +83,16 @@ payload = operation (1) | keyLength (4) | valueLength (4) | key | value
 
 文件层用最小可替换 I/O 边界做短写与同步失败注入，不引入 Mock 框架。不会把预期生产环境故障测试完全替换为伪实现测试。
 
+### 6. 文件写入步骤的接口与边界
+
+本小步新增 `WalWriter.openEmpty(Path)`、`append(WalRecord)` 和 `close()`，单线程独占日志。openEmpty 接受不存在、零字节或仅含完整合法文件头的文件；已有记录的文件在校验文件头后仍拒绝打开且保留原内容，避免在恢复扫描尚未实现时直接接着不完整尾部追加。这是当前写入组件的阶段性限制，不替代最终存储入口的恢复契约。
+
+WalWriter 生命周期为 OPEN、FAILED、CLOSED；状态检查先于编码，编码参数失败不使 OPEN 失效。追加成功必须完整写出帧并同步，发生 IOException 则进入 FAILED。close 先将状态改为 CLOSED 再释放资源，关闭报错后仍拒绝追加；重复关闭不再操作底层资源。
+
+包内 WalIo 仅包含 size、按偏移 read/write、force 和 close，FileChannelWalIo 转发到真实 FileChannel，force 固定使用 true。采用按偏移读写，追加偏移由 writer 私有维护；循环处理短读、短写，返回 0 表示未取得进展时抛 IOException，避免无限循环。打开失败必须尝试关闭已取得的资源；关闭异常以 suppressed 保留，不掩盖原始错误。文件头校验及拒绝已有记录都不写文件。
+
+验收覆盖真实临时文件的文件头和顺序帧内容、非法文件不变性，以及代理真实文件通道注入的短读/短写、读写无进展、追加/同步/初始化/关闭失败。之后实现恢复扫描时再扩展已有记录的打开路径，本步不提前实现重放或截尾。
+
 ## Risks / Trade-offs
 
 - [日志无限增长、恢复时间增加] → 此阶段只验证 WAL，轮转和回收等待与刷盘共同设计。

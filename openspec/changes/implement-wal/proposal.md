@@ -28,4 +28,4 @@
 - 计划新增 `io.github.flyzz.mylsm.wal` 与单线程存储入口及对应 JUnit 测试，复用现有 ByteKey、Value、Tombstone 和 TreeMapMemTable。
 - 使用 JDK 的 FileChannel、ByteBuffer 和 CRC32C，不增加第三方运行依赖。
 - 文件测试使用 `@TempDir`，运行日志放在忽略的 `data/`；完成阶段时更新 README、路线图和学习笔记。
-- 此提案描述待实现行为；本次仅建立规划文件，不更新正式 specs 或声明持久化已完成。
+- 本 change 完成全部实现和验证前不更新正式 specs 或声明持久化 KV 已完成；当前进度见 tasks.md。

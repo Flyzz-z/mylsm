@@ -1,6 +1,6 @@
 # 第二步：值、删除标记与记录缺失
 
-本步实现 Entry、Value 和 Tombstone。MemTable 与 get 方法将在后续步骤实现。
+本步实现 Entry、Value 和 Tombstone。类型位于 `model` 包；后续实现见 [MemTable 学习笔记](memtable.md)。
 
 ## Entry 为什么是空接口
 
@@ -44,11 +44,11 @@ public enum Tombstone implements Entry {
 Entry deleted = Tombstone.INSTANCE;
 ```
 
-删除标记不保存键或字节值，所以所有键都能共享它。未来表中的 `key-a → Tombstone.INSTANCE` 表示删除 key-a；`key-b → Tombstone.INSTANCE` 表示删除 key-b。键在映射关系中，不在标记内部。
+删除标记不保存键或字节值，所以所有键都能共享它。表中的 `key-a → Tombstone.INSTANCE` 表示删除 key-a；`key-b → Tombstone.INSTANCE` 表示删除 key-b。键在映射关系中，不在标记内部。
 
 ## 两种记录如何构成三种查询状态
 
-未来计划使用 `Optional<Entry> get(ByteKey key)`，此方法当前尚未实现。
+MemTable 使用 `Optional<Entry> get(ByteKey key)`；这个接口已在后续步骤实现。
 
 | 表达式 | 含义 |
 | --- | --- |
@@ -67,4 +67,4 @@ ValueTest 验证输入与输出的数组隔离、内容相等和哈希一致、�
 ./mvnw clean verify
 ```
 
-下一步讨论 MemTable 的 put/get/delete 接口与有序遍历，再实现基于 TreeMap 的第一版。
+接着阅读 [MemTable 的 put/get/delete 实现](memtable.md)。有序遍历留待下一步讨论。

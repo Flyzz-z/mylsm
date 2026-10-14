@@ -1,4 +1,4 @@
-package io.github.flyzz.mylsm;
+package io.github.flyzz.mylsm.model;
 
 /**
  * 无载荷的删除标记，所有键共享同一实例。

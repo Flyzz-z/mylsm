@@ -1,4 +1,4 @@
-package io.github.flyzz.mylsm;
+package io.github.flyzz.mylsm.model;
 
 import org.junit.jupiter.api.Test;
 

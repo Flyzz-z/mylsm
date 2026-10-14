@@ -67,4 +67,4 @@ ValueTest 验证输入与输出的数组隔离、内容相等和哈希一致、�
 ./mvnw clean verify
 ```
 
-接着阅读 [MemTable 的 put/get/delete 实现](memtable.md)。有序遍历留待下一步讨论。
+接着阅读 [MemTable 的 put/get/delete 实现](memtable.md)。有序遍历见 [快照实现](memtable-snapshot.md)。

@@ -5,6 +5,8 @@ import io.github.flyzz.mylsm.model.Entry;
 import io.github.flyzz.mylsm.model.Tombstone;
 import io.github.flyzz.mylsm.model.Value;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -32,5 +34,13 @@ public final class TreeMapMemTable implements MemTable {
         Objects.requireNonNull(key, "key");
         // 不能 remove：删除标记需要遮蔽未来磁盘层中可能存在的旧值。
         entries.put(key, Tombstone.INSTANCE);
+    }
+
+    @Override
+    public List<MemTableRecord> snapshot() {
+        var records = new ArrayList<MemTableRecord>(entries.size());
+        // 新建配对以固定映射；共享不可变组件，不保留原表的可变 Map.Entry。
+        entries.forEach((key, entry) -> records.add(new MemTableRecord(key, entry)));
+        return List.copyOf(records);
     }
 }

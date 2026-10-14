@@ -56,15 +56,15 @@ entries.put(key, Tombstone.INSTANCE);
 - null 键或 null 值会抛出 NullPointerException。检查发生在修改表之前，因此失败不会覆盖原记录。
 - 每个实例持有自己的 TreeMap；没有共享可变表状态。
 - 本版只支持单线程访问。所有数据仅在内存中，没有 WAL、刷盘或重启恢复。
-- TreeMap 以红黑树保持内部键顺序，基本操作进行 O(log n) 次键比较；字节键比较自身还取决于共同前缀长度。当前尚未暴露遍历 API。
+- TreeMap 以红黑树保持内部键顺序，基本操作进行 O(log n) 次键比较；字节键比较自身还取决于共同前缀长度。目前已有 snapshot 有序遍历接口，见 [快照学习笔记](memtable-snapshot.md)。
 
 ## 如何验证实现可以替换
 
-`MemTableContractTest` 包含 12 个只调用接口的行为测试；`TreeMapMemTableTest` 继承这些测试，只负责创建具体实现。以后新增跳表时，通过同一组测试验证其写入、查询三态、删除、空值、错误与数据隔离语义。
+`MemTableContractTest` 包含 12 个基础操作测试及 5 个快照测试，均只调用接口；`TreeMapMemTableTest` 继承这些测试，只负责创建具体实现。以后新增跳表时，通过同一组测试验证其写入、查询三态、删除、空值、错误与数据隔离语义。
 
 ```sh
 ./mvnw -Dtest=TreeMapMemTableTest test
 ./mvnw clean verify
 ```
 
-下一步是有序遍历：需要讨论返回键值记录的形式，以及遍历开始后发生写入时，要看到快照还是实时变化，再为刷盘准备接口。
+有序遍历已选择并实现复制快照，见 [下一步学习笔记](memtable-snapshot.md)。冻结与刷盘留待后续阶段。

@@ -6,6 +6,7 @@ import io.github.flyzz.mylsm.model.Value;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -157,6 +158,122 @@ abstract class MemTableContractTest {
         other.put(key(1), value(20));
         assertEquals(Optional.of(value(10)), table.get(key(1)));
         assertEquals(Optional.of(value(20)), other.get(key(1)));
+    }
+
+    @Test
+    void emptySnapshotStaysEmptyAfterLaterWrites() {
+        var snapshot = table.snapshot();
+
+        assertEquals(List.of(), snapshot);
+        assertEquals(Optional.empty(), table.get(key(1)));
+        assertThrows(UnsupportedOperationException.class,
+                () -> snapshot.add(new MemTableRecord(key(1), value(10))));
+        table.put(key(1), value(10));
+
+        assertEquals(List.of(), snapshot);
+        assertEquals(List.of(new MemTableRecord(key(1), value(10))), table.snapshot());
+    }
+
+    @Test
+    void snapshotIncludesLatestRecordsAndTombstonesInUnsignedKeyOrder() {
+        ByteKey emptyKey = ByteKey.copyOf(new byte[0]);
+        ByteKey prefix = ByteKey.copyOf(new byte[]{1, 0});
+        Value emptyValue = Value.copyOf(new byte[0]);
+        table.put(key(0xff), value(60));
+        table.put(key(0x80), value(50));
+        table.put(key(1), value(10));
+        table.put(prefix, value(20));
+        table.put(key(0x7f), value(40));
+        table.put(emptyKey, emptyValue);
+        table.put(key(1), value(30));
+        table.delete(key(0x80));
+        table.delete(key(2));
+
+        var expected = List.of(
+                new MemTableRecord(emptyKey, emptyValue),
+                new MemTableRecord(key(1), value(30)),
+                new MemTableRecord(prefix, value(20)),
+                new MemTableRecord(key(2), Tombstone.INSTANCE),
+                new MemTableRecord(key(0x7f), value(40)),
+                new MemTableRecord(key(0x80), Tombstone.INSTANCE),
+                new MemTableRecord(key(0xff), value(60)));
+        assertEquals(expected, table.snapshot());
+        assertEquals(expected, table.snapshot());
+        for (MemTableRecord record : expected) {
+            assertEquals(Optional.of(record.entry()), table.get(record.key()));
+        }
+    }
+
+    @Test
+    void snapshotKeepsOldMappingsWhileNewSnapshotsSeeEveryMutation() {
+        table.put(key(1), value(10));
+        table.put(key(2), value(20));
+        table.delete(key(3));
+        var oldSnapshot = table.snapshot();
+        var oldIterator = oldSnapshot.iterator();
+
+        table.put(key(1), value(11));  // 覆盖同一树节点的值
+        table.delete(key(2));
+        table.put(key(3), value(30));  // 删除标记变为值
+        table.put(key(4), value(40));  // 改变树结构
+        table.delete(key(5));
+
+        var expectedOld = List.of(
+                new MemTableRecord(key(1), value(10)),
+                new MemTableRecord(key(2), value(20)),
+                new MemTableRecord(key(3), Tombstone.INSTANCE));
+        assertEquals(expectedOld, oldSnapshot);
+        for (MemTableRecord record : expectedOld) {
+            assertEquals(record, oldIterator.next());
+        }
+        assertFalse(oldIterator.hasNext());
+        assertEquals(List.of(
+                new MemTableRecord(key(1), value(11)),
+                new MemTableRecord(key(2), Tombstone.INSTANCE),
+                new MemTableRecord(key(3), value(30)),
+                new MemTableRecord(key(4), value(40)),
+                new MemTableRecord(key(5), Tombstone.INSTANCE)), table.snapshot());
+    }
+
+    @Test
+    void snapshotRejectsListAndIteratorMutations() {
+        table.put(key(1), value(10));
+        var snapshot = table.snapshot();
+        var replacement = new MemTableRecord(key(2), value(20));
+
+        assertThrows(UnsupportedOperationException.class, () -> snapshot.add(replacement));
+        assertThrows(UnsupportedOperationException.class, () -> snapshot.set(0, replacement));
+        assertThrows(UnsupportedOperationException.class, () -> snapshot.remove(0));
+        assertThrows(UnsupportedOperationException.class, snapshot::clear);
+        var iterator = snapshot.iterator();
+        iterator.next();
+        assertThrows(UnsupportedOperationException.class, iterator::remove);
+
+        assertEquals(List.of(new MemTableRecord(key(1), value(10))), snapshot);
+        assertEquals(snapshot, table.snapshot());
+        assertEquals(Optional.of(value(10)), table.get(key(1)));
+        assertEquals(Optional.empty(), table.get(key(2)));
+    }
+
+    @Test
+    void snapshotBytesCannotBeChangedThroughExternalArrays() {
+        byte[] keyBytes = {1};
+        byte[] valueBytes = {10};
+        table.put(ByteKey.copyOf(keyBytes), Value.copyOf(valueBytes));
+        var snapshot = table.snapshot();
+
+        keyBytes[0] = 2;
+        valueBytes[0] = 20;
+        MemTableRecord record = snapshot.getFirst();
+        record.key().toByteArray()[0] = 3;
+        Value returned = assertInstanceOf(Value.class, record.entry());
+        returned.toByteArray()[0] = 30;
+
+        assertEquals(List.of(new MemTableRecord(key(1), value(10))), snapshot);
+        assertEquals(snapshot, table.snapshot());
+        assertEquals(Optional.of(value(10)), table.get(key(1)));
+        assertEquals(Optional.empty(), table.get(key(2)));
+        assertEquals(Optional.empty(), table.get(key(3)));
     }
 
     private static ByteKey key(int value) {

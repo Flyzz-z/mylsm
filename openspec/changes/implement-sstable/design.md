@@ -104,6 +104,10 @@ Writer 使用 CREATE_NEW，拒绝覆盖任何已有文件；父目录须存在�
 
 首个代码步骤将数据块接口具体化为包内静态 `encode(List<SsTableRecord>): byte[]` 与 `decode(byte[]): List<SsTableRecord>`。encode 要求非空且严格递增，返回独立帧数组，不修改输入；null 抛 NullPointerException，空块、顺序错误和超限抛 IllegalArgumentException。decode 只接受恰好一个完整非空块，先验证长度和 CRC，再验证数量、每条结构及顺序，全部成功后返回不可修改的列表，不保留输入数组。前缀不足或合法长度下缺失帧字节抛 EOFException；其他结构错误抛 IOException。EOFException 仅说明字节不足，不意味着 SSTable 可以像 WAL 一样截尾修复。当前最小数据块 payload 为 4 字节计数加 9 字节空键/空值记录，共 13 字节。空表应没有数据块，不编码零记录的数据块。编解码不执行 4 KiB 分块，也不验证尚未实现的跨块索引边界。
 
+元信息步骤新增包内 `SsTableMetadataCodec`，包含不可变描述符 `IndexEntry(ByteKey maxKey, long offset, int frameLength)` 与 `Footer(long indexOffset, int indexLength)`。接口为 `encodeHeader()/decodeHeader(byte[])`、`encodeIndex(List<IndexEntry>, long indexOffset)/decodeIndex(byte[], long indexOffset)` 和 `encodeFooter(Footer)/decodeFooter(byte[], long fileSize)`。索引编码的非法输入布局抛 IllegalArgumentException，容量超限抛 IOException；所有解码中的非法字段及布局抛 IOException，合法格式字节不足抛 EOFException；null 抛 NullPointerException。
+
+索引解码返回不可修改的对象列表，键为独立的不可变 ByteKey，沿用用户撤回紧凑索引优化后的方案。计数须先验证不超过 `(payloadLength - 4) / 16`；maxKeyLength 须非负且不超过单条记录所能容纳的最大键长度 `16 MiB - 9`，还须能装入对应块。块长度范围为 `21..16 MiB + 12` 字节，并至少能容纳 21 字节固定开销与该最大键。连续性从偏移 8 开始检查，每个长度先与 `indexOffset - expectedOffset` 比较，再推进 expectedOffset，因此不会让相加溢出绕过检查；空索引只允许 indexOffset=8。Footer 校验索引帧长度为 `12..64 MiB + 8`、文件总长可用 long 表示、索引终点恰在 `fileSize - 24`。元信息校验不访问实际数据块，最大键是否确实匹配数据块内容仍由后续 Reader 读取块时验证。本步只在内存中组装完整字节样例，不引入 Writer、Reader 或文件 I/O 故障注入。
+
 ### 6. 需要用户参与的设计点与实现顺序
 
 先结合具体记录解释：块级校验和每块最大键索引、4 KiB 目标与大记录独占块、按需数据校验、一次性 CREATE_NEW 写入。它们是具体提案，尚未在 tasks 中标记为用户已逐项确定。

@@ -2,7 +2,7 @@
 
 使用 **Java 21** 分阶段实现 LSM Tree，由你指挥 AI 逐步实现核心算法，在理解设计、代码与取舍的过程中学习存储引擎。当前已完成环境初始化、不可变字节模型和基于 TreeMap 的 MemTable（put/get/delete/snapshot），已完成阶段 1 的内存 KV 范围；阶段 2 已完成 WAL 编解码、同步追加、恢复扫描、残缺尾部修复及 WalStore 组合入口，支持单线程读写与重新打开恢复，已复盘并归档。
 
-阶段 3 正在进行：已实现 SSTable 记录与完整数据块编解码，包含块内排序、长度和 CRC32C 验证；文件构建、索引与查询尚未实现。见 [SSTable 数据块笔记](docs/sstable-block.md)。
+阶段 3 正在进行：已实现 SSTable 记录、完整数据块及文件头/索引/Footer 编解码，包含排序、长度、CRC32C 和元信息布局验证；文件写入与查询尚未实现。见 [SSTable 数据块笔记](docs/sstable-block.md) 和 [元信息笔记](docs/sstable-metadata.md)。
 
 ## 环境与构建
 
@@ -28,7 +28,7 @@ src/main/java/io/github/flyzz/mylsm/
   model/                             ByteKey、Entry、Value、Tombstone
   memtable/                          MemTable、TreeMapMemTable、MemTableRecord
   wal/                               WAL 编解码、同步追加与恢复修复、WalStore
-  sstable/                           SSTable 记录与数据块编解码（阶段进行中）
+  sstable/                           SSTable 记录、数据块和元信息编解码（阶段进行中）
 src/test/java/io/github/flyzz/mylsm/  对应子包的 JUnit 测试
 docs/roadmap.md                       学习路线与每阶段节奏
 openspec/config.yaml                  项目背景与规范约定

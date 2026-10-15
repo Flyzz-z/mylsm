@@ -59,4 +59,4 @@ OPEN ──追加或同步 IOException──→ FAILED
 
 所有文件测试使用 `@TempDir`。覆盖文件头布局、连续追加、仅有头部的文件重开、非法文件不变性、已有完整或半条记录的拒绝、短读写、零进展、参数失败、初始化/追加/同步/读取/关闭故障及资源清理。
 
-恢复扫描和尾部修复现已实现，见 [恢复笔记](wal-recovery.md)；组合后的 WalStore 见 [存储组合笔记](wal-store.md)。WAL change 保持未归档，待阶段复盘。
+恢复扫描和尾部修复现已实现，见 [恢复笔记](wal-recovery.md)；组合后的 WalStore 与阶段复盘见 [存储组合笔记](wal-store.md)。WAL change 已完成复盘并归档。

@@ -68,4 +68,4 @@ WalRecoveryTest 使用 `@TempDir` 和真实文件，覆盖顺序重放、二进�
 
 关键不变量是：完整记录验证前不交给回调，确认有效前不推进有效边界，残缺尾部截断并同步成功前不开放追加。
 
-后续已实现 WalStore：成功写入先 WAL 同步再更新 MemTable，打开时重放到新的内存表，见 [存储组合笔记](wal-store.md)。当前 change 保持进行中，待阶段复盘和归档。
+后续已实现 WalStore：成功写入先 WAL 同步再更新 MemTable，打开时重放到新的内存表，见 [存储组合与阶段复盘笔记](wal-store.md)。WAL change 已完成复盘并归档。

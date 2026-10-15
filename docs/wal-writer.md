@@ -1,6 +1,6 @@
 # WAL 文件初始化与同步追加
 
-本笔记记录文件写入小步：WalWriter、WalIo 与 FileChannelWalIo 可以初始化日志文件、同步追加操作记录，并在 I/O 失败后停止写入。后续已补充恢复扫描与截尾，见 [恢复笔记](wal-recovery.md)；MemTable 组合待实现。
+本笔记记录文件写入小步：WalWriter、WalIo 与 FileChannelWalIo 可以初始化日志文件、同步追加操作记录，并在 I/O 失败后停止写入。后续已补充恢复扫描与截尾，见 [恢复笔记](wal-recovery.md)；与 MemTable 的组合见 [存储组合笔记](wal-store.md)。
 
 ## 文件布局
 
@@ -59,4 +59,4 @@ OPEN ──追加或同步 IOException──→ FAILED
 
 所有文件测试使用 `@TempDir`。覆盖文件头布局、连续追加、仅有头部的文件重开、非法文件不变性、已有完整或半条记录的拒绝、短读写、零进展、参数失败、初始化/追加/同步/读取/关闭故障及资源清理。
 
-恢复扫描和尾部修复现已实现，见 [恢复笔记](wal-recovery.md)。现阶段仍不提供组合后的可重启恢复 KV 存储，WAL change 保持未归档。
+恢复扫描和尾部修复现已实现，见 [恢复笔记](wal-recovery.md)；组合后的 WalStore 见 [存储组合笔记](wal-store.md)。WAL change 保持未归档，待阶段复盘。

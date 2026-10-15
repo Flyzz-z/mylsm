@@ -1,6 +1,6 @@
 # WAL 恢复扫描与尾部修复
 
-本小步提供 `WalWriter.openRecovering(Path, Consumer<WalRecord>)`：读取并验证已有记录，逐条交给回调，必要时修复残缺尾部，然后返回可继续追加的 writer。`openEmpty` 保留只打开空日志的契约。MemTable 的组合仍待下一小步实现。
+本小步提供 `WalWriter.openRecovering(Path, Consumer<WalRecord>)`：读取并验证已有记录，逐条交给回调，必要时修复残缺尾部，然后返回可继续追加的 writer。`openEmpty` 保留只打开空日志的契约。后续已补充 MemTable 组合，见 [存储组合笔记](wal-store.md)。
 
 ## 数据流与偏移
 
@@ -50,7 +50,7 @@ CRC 不能在尚未读完整帧时验证。若长度被改成范围内的大数�
 扫描器每确认一条记录，就调用一次 `replay.accept(record)`。它不收集全部历史，内存主要受单条记录上限约束；若调用方主动将记录保存到 List，仍需承担整份历史的内存开销。
 
 ```java
-// 用于观察记录顺序；正式存储稍后会将回调接到临时 MemTable。
+// 用于观察记录顺序；WalStore 将回调接到临时 MemTable。
 try (WalWriter writer = WalWriter.openRecovering(path, record -> {
     System.out.println(record);
 })) {
@@ -58,7 +58,7 @@ try (WalWriter writer = WalWriter.openRecovering(path, record -> {
 }
 ```
 
-回调必须只修改尚未对外暴露的临时状态，不得修改或重新打开同一日志。后面的记录损坏、回调自身抛出异常，或者截尾失败时，之前的回调调用不会被撤销。未来的 WalStore 必须在打开失败时丢弃临时 MemTable。
+回调必须只修改尚未对外暴露的临时状态，不得修改或重新打开同一日志。后面的记录损坏、回调自身抛出异常，或者截尾失败时，之前的回调调用不会被撤销。WalStore 在打开失败时不暴露临时 MemTable。
 
 扫描、回调、截断或同步失败都不返回可写 writer，并尝试关闭资源；关闭失败以 suppressed 附在原异常上。可检测损坏不会修改文件；截断或修复同步失败可能已经改变尾部，不保证回滚。
 
@@ -68,4 +68,4 @@ WalRecoveryTest 使用 `@TempDir` 和真实文件，覆盖顺序重放、二进�
 
 关键不变量是：完整记录验证前不交给回调，确认有效前不推进有效边界，残缺尾部截断并同步成功前不开放追加。
 
-下一小步是 WalStore：成功写入先 WAL 同步再更新 MemTable，打开时重放到新的内存表。当前 change 保持进行中，尚未提供组合后的持久化 KV API。
+后续已实现 WalStore：成功写入先 WAL 同步再更新 MemTable，打开时重放到新的内存表，见 [存储组合笔记](wal-store.md)。当前 change 保持进行中，待阶段复盘和归档。

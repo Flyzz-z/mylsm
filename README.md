@@ -1,6 +1,6 @@
 # MyLSM
 
-使用 **Java 21** 分阶段实现 LSM Tree，由你指挥 AI 逐步实现核心算法，在理解设计、代码与取舍的过程中学习存储引擎。当前已完成环境初始化、不可变字节模型和基于 TreeMap 的 MemTable（put/get/delete/snapshot），已完成阶段 1 的内存 KV 范围；阶段 2 已实现 WAL 编解码、文件头、同步追加、恢复扫描及残缺尾部修复，MemTable 组合尚未实现，暂不提供组合后的持久化 KV API。
+使用 **Java 21** 分阶段实现 LSM Tree，由你指挥 AI 逐步实现核心算法，在理解设计、代码与取舍的过程中学习存储引擎。当前已完成环境初始化、不可变字节模型和基于 TreeMap 的 MemTable（put/get/delete/snapshot），已完成阶段 1 的内存 KV 范围；阶段 2 已实现 WAL 编解码、同步追加、恢复扫描、残缺尾部修复及 WalStore 组合入口，支持单线程读写与重新打开恢复，仍待阶段复盘和归档。
 
 ## 环境与构建
 
@@ -17,7 +17,7 @@ java -version
 openspec validate --all --strict --no-interactive
 ```
 
-首次构建需要联网下载 Maven 和依赖。Windows 使用 `mvnw.cmd`。JUnit 5 已覆盖基础模型与 MemTable 契约、WAL 帧格式与损坏输入，以及文件头、同步追加、恢复扫描、尾部修复、短读写和 I/O 失败状态；构建通过只代表当前已实现范围通过验证。
+首次构建需要联网下载 Maven 和依赖。Windows 使用 `mvnw.cmd`。JUnit 5 已覆盖基础模型与 MemTable 契约、WAL 帧格式与损坏输入、同步追加与恢复修复、短读写和 I/O 失败状态，以及 WalStore 的三态查询、重放、失败边界和独立进程未正常关闭时的恢复；构建通过只代表当前已实现范围通过验证。
 
 ## 目录
 
@@ -25,7 +25,7 @@ openspec validate --all --strict --no-interactive
 src/main/java/io/github/flyzz/mylsm/
   model/                             ByteKey、Entry、Value、Tombstone
   memtable/                          MemTable、TreeMapMemTable、MemTableRecord
-  wal/                               WAL 记录、编解码、同步追加与恢复修复
+  wal/                               WAL 编解码、同步追加与恢复修复、WalStore
 src/test/java/io/github/flyzz/mylsm/  对应子包的 JUnit 测试
 docs/roadmap.md                       学习路线与每阶段节奏
 openspec/config.yaml                  项目背景与规范约定
@@ -59,4 +59,4 @@ openspec archive add-memtable-iteration
 
 默认分支为 `main`，每阶段使用独立主题分支、小步提交。忽略构建产物、IDE 配置与 `data/` 运行数据；本轮不配置远端或推送。
 
-见 [学习路线](docs/roadmap.md) 和 [协作约定](AGENTS.md)。已完成的基础模型见 [ByteKey 学习笔记](docs/byte-key.md) 和 [记录模型学习笔记](docs/entry-model.md)。内存表实现见 [MemTable 学习笔记](docs/memtable.md)。有序遍历及阶段复盘见 [快照学习笔记](docs/memtable-snapshot.md)。当前 WAL 见 [编解码学习笔记](docs/wal-codec.md)、[文件写入笔记](docs/wal-writer.md) 和 [恢复笔记](docs/wal-recovery.md)，与 MemTable 的存储组合待下一小步实现。
+见 [学习路线](docs/roadmap.md) 和 [协作约定](AGENTS.md)。已完成的基础模型见 [ByteKey 学习笔记](docs/byte-key.md) 和 [记录模型学习笔记](docs/entry-model.md)。内存表实现见 [MemTable 学习笔记](docs/memtable.md)。有序遍历及阶段复盘见 [快照学习笔记](docs/memtable-snapshot.md)。当前 WAL 见 [编解码学习笔记](docs/wal-codec.md)、[文件写入笔记](docs/wal-writer.md)、[恢复笔记](docs/wal-recovery.md) 和 [存储组合笔记](docs/wal-store.md)。WalStore 单线程独占日志，成功写入依赖平台正确实现文件同步，不保证新建文件父目录项的断电持久性；未正常关闭的进程退出测试不等同于断电实验。

@@ -23,4 +23,4 @@
 4. **验证**：AI 运行针对性的测试，解释结果、分析失败并修复，你参与审阅。
 5. **复盘**：共同回顾关键不变量与设计取舍，记录到 `docs/`；归档 change 并提交 Git。
 
-当前已完成阶段 0 与阶段 1：字节键、记录模型、MemTable 基本操作及复制式有序快照。见 [键学习笔记](byte-key.md)、[记录学习笔记](entry-model.md)、[MemTable 学习笔记](memtable.md) 和 [快照与阶段复盘](memtable-snapshot.md)。阶段 2 已完成 WAL 编解码、文件头、同步追加、恢复扫描及残缺尾部修复，见 [WAL 编解码笔记](wal-codec.md)、[文件写入笔记](wal-writer.md) 和 [恢复笔记](wal-recovery.md)；MemTable 组合待实现，冻结和刷盘仍留在后续阶段。
+当前已完成阶段 0 与阶段 1：字节键、记录模型、MemTable 基本操作及复制式有序快照。见 [键学习笔记](byte-key.md)、[记录学习笔记](entry-model.md)、[MemTable 学习笔记](memtable.md) 和 [快照与阶段复盘](memtable-snapshot.md)。阶段 2 已实现 WAL 编解码、文件头、同步追加、恢复扫描、残缺尾部修复及 WalStore 组合，见 [WAL 编解码笔记](wal-codec.md)、[文件写入笔记](wal-writer.md)、[恢复笔记](wal-recovery.md) 和 [存储组合笔记](wal-store.md)；已验证独立进程未正常关闭时的恢复，仍待共同复盘和归档。SSTable、冻结和刷盘留在后续阶段。

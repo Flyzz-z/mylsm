@@ -75,7 +75,7 @@ payload = operation (1) | keyLength (4) | valueLength (4) | key | value
 
 计划新增 wal 包内的不可变 WalRecord（ByteKey 与 Entry）、WalCodec（单条帧编解码）和文件 WAL 组件。WalCodec 与文件 I/O 分离，先验证格式与拒绝非法输入，再实现追加和扫描。
 
-存储入口暂定 `WalStore.open(Path)`、`put(ByteKey, Value)`、`delete(ByteKey)`、`get(ByteKey)` 和 `close()`，实现 AutoCloseable；I/O 问题通过 IOException，非法参数通过 NullPointerException/IllegalArgumentException，已关闭或失败状态通过 IllegalStateException 表达。get 保持 Optional<Entry> 三态，存储内部的 MemTable 不暴露给外部修改。
+存储入口采用 `WalStore.open(Path)`、`put(ByteKey, Value)`、`delete(ByteKey)`、`get(ByteKey)` 和 `close()`，实现 AutoCloseable；I/O 问题通过 IOException，非法参数通过 NullPointerException/IllegalArgumentException，已关闭或失败状态通过 IllegalStateException 表达。get 保持 Optional<Entry> 三态，存储内部的 MemTable 不暴露给外部修改。
 
 第一步接口为 `WalCodec.encode(WalRecord): byte[]` 与 `WalCodec.decode(byte[]): WalRecord`，均为静态方法。encode 返回独立数组；null 输入抛出 NullPointerException，载荷超限抛出 IllegalArgumentException。decode 只接收恰好一条完整帧，不修改输入、不保留可变数组引用；null 输入抛出 NullPointerException，不完整前缀或合法长度下的缺失载荷抛出 EOFException，非法长度、额外字节、校验失败及非法结构抛出 IOException。decode 不做尾部修复；识别文件 EOF 与决定截尾由之后的文件扫描层负责。
 
@@ -104,6 +104,16 @@ WalWriter 生命周期为 OPEN、FAILED、CLOSED；状态检查先于编码，�
 回调替代返回完整 List，避免扫描器内存随日志历史增长；回调本身若保存所有记录仍会占用相应内存。打开失败时回调可能已处理部分记录，不能回滚，调用方只能重放到尚未对外暴露的临时状态，并在失败时丢弃。回调不得修改或重新打开同一文件。实际重放到新 MemTable 留给第 5 组任务，本步测试使用记录收集器检查顺序。
 
 沿用三个长度字段：payloadLength 描述外层帧，keyLength/valueLength 描述内部结构，三者存在可计算的冗余；当前选择保留，以维持文件扫描与载荷解析的职责分离。长度在读取完整帧前只有范围检查，CRC 仍须读完整帧才可验证；合法长度被改大可能被识别为残缺尾部，沿用第 4 节的格式限制。
+
+### 8. 存储组合步骤的接口与边界
+
+WalStore 放在 wal 包中，作为本阶段的单线程组合入口，内部私有持有 WalWriter 与一张新的 TreeMapMemTable；不引入通用存储接口，不暴露可变 MemTable、writer 或 snapshot。查询保留 Optional<Entry> 的值、Tombstone 与未找到三态。
+
+open 创建临时 MemTable，并将只更新该表的 Consumer 交给 openRecovering；记录按文件顺序覆盖或保存删除标记，不能调用 store.put/delete，避免重新写日志。扫描与尾部修复全部成功后才返回 store；恢复失败由 writer 关闭文件，不暴露临时表。
+
+put/delete 先检查 OPEN，再构造 WalRecord，调用 writer.append 完成编码、大小检查、完整追加和同步，然后通过 apply 更新内存。正常写入与恢复共用 apply，但只有正常写入路径调用 writer.append。null 或超限错误发生在日志追加前，不使 store 失效。追加/同步 IOException 使 store 进入 FAILED，查询也拒绝，因为完整日志可能已包含内存尚未应用的操作；重新打开依据实际有效日志恢复，不保证报错操作被回滚。同步成功后内存更新若意外抛出 RuntimeException/Error，同样停止服务，防止继续暴露过时状态。
+
+close 先将 store 标为 CLOSED 再关闭 writer；重复关闭不重复操作资源，关闭失败后也不能读写。测试沿用包内 WalIo 注入边界观察同步前旧内存状态、制造部分追加/完整追加后报错/同步报错，避免暴露内部可变表进行断言。独立 JVM 测试在所有写入成功后使用 Runtime.halt(0)，明确跳过 close 与 shutdown hook，再由测试进程恢复；此测试与人工截断、同步调用顺序共同验证约定，不代表断电实验或父目录项持久性保证。
 
 ## Risks / Trade-offs
 

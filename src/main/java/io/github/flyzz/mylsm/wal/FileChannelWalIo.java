@@ -37,6 +37,11 @@ final class FileChannelWalIo implements WalIo {
     }
 
     @Override
+    public void truncate(long size) throws IOException {
+        channel.truncate(size);
+    }
+
+    @Override
     public void force() throws IOException {
         channel.force(true);
     }

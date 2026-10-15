@@ -12,6 +12,8 @@ interface WalIo extends Closeable {
 
     int write(ByteBuffer source, long offset) throws IOException;
 
+    void truncate(long size) throws IOException;
+
     /** 同步文件内容和相关元数据。 */
     void force() throws IOException;
 }

@@ -353,6 +353,11 @@ class WalWriterTest {
         }
 
         @Override
+        public void truncate(long size) throws IOException {
+            delegate.truncate(size);
+        }
+
+        @Override
         public void force() throws IOException {
             forceCalls++;
             if (failForce) {

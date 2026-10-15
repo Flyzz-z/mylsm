@@ -102,6 +102,8 @@ Writer 使用 CREATE_NEW，拒绝覆盖任何已有文件；父目录须存在�
 
 非法调用参数/输入顺序/记录超限以 NullPointerException 或 IllegalArgumentException 表达；文件错误、编码内容损坏及索引容量超限以 IOException 表达。Reader 状态为 OPEN、FAILED、CLOSED，关闭可重复，失败或关闭后拒绝 get/scan。打开失败须释放已获取资源，关闭失败也不得恢复使用。scan 回调不得关闭、重入 reader 或修改同一文件。
 
+首个代码步骤将数据块接口具体化为包内静态 `encode(List<SsTableRecord>): byte[]` 与 `decode(byte[]): List<SsTableRecord>`。encode 要求非空且严格递增，返回独立帧数组，不修改输入；null 抛 NullPointerException，空块、顺序错误和超限抛 IllegalArgumentException。decode 只接受恰好一个完整非空块，先验证长度和 CRC，再验证数量、每条结构及顺序，全部成功后返回不可修改的列表，不保留输入数组。前缀不足或合法长度下缺失帧字节抛 EOFException；其他结构错误抛 IOException。EOFException 仅说明字节不足，不意味着 SSTable 可以像 WAL 一样截尾修复。当前最小数据块 payload 为 4 字节计数加 9 字节空键/空值记录，共 13 字节。空表应没有数据块，不编码零记录的数据块。编解码不执行 4 KiB 分块，也不验证尚未实现的跨块索引边界。
+
 ### 6. 需要用户参与的设计点与实现顺序
 
 先结合具体记录解释：块级校验和每块最大键索引、4 KiB 目标与大记录独占块、按需数据校验、一次性 CREATE_NEW 写入。它们是具体提案，尚未在 tasks 中标记为用户已逐项确定。

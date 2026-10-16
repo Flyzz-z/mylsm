@@ -2,6 +2,8 @@
 
 本小步提供 `WalWriter.openRecovering(Path, Consumer<WalRecord>)`：读取并验证已有记录，逐条交给回调，必要时修复残缺尾部，然后返回可继续追加的 writer。`openEmpty` 保留只打开空日志的契约。后续已补充 MemTable 组合，见 [存储组合笔记](wal-store.md)。
 
+阶段 4 为目录级恢复新增 `openExistingRecovering`（不创建、不初始化缺失或零字节引用日志）和 `replaySealed`（长度匹配、只读严格重放且不修尾），共享本篇的格式扫描逻辑，见 [LSM 目录恢复笔记](lsm-store.md)。原有入口契约保持不变。
+
 ## 数据流与偏移
 
 ```text

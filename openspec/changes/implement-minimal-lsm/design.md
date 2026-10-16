@@ -1,10 +1,10 @@
 ## Context
 
-动机与范围见 proposal.md。现有 WalStore 私有持有一个 MemTable 和 WalWriter，面向单调用线程；SsTableWriter 接收严格有序输入，SsTableReader 支持三态点查。MemTable.snapshot 复制但不冻结表。当前没有文件集元信息、日志轮换或后台线程。
+动机与范围见 proposal.md。本 change 起步时，WalStore 私有持有一个 MemTable 和 WalWriter，面向单调用线程；SsTableWriter 接收严格有序输入，SsTableReader 支持三态点查。MemTable.snapshot 复制但不冻结表，尚无文件集元信息、日志轮换或后台线程。
 
 用户已确定采用后台刷盘：一个活跃表、最多一个冻结表、一个刷盘线程，冻结槽位忙且活跃表达到阈值时写入等待。本设计将其落到独立目录级入口，不改变旧组件的独立使用契约。除用户已选的并发模型外，下列格式、默认值和接口是本提案给出的具体方案，随对应实现小步讲解和验证。
 
-当前已完成包内 ManifestState/ManifestCodec，以及 ManifestFile/ManifestIo 的文件追加、同步与恢复，学习笔记见 docs/manifest-codec.md 和 docs/manifest-file.md。目录级恢复、日志轮换和线程协调尚未实现，以下相应流程仍是后续设计。
+当前已完成 Manifest 编解码及文件追加恢复，以及 LsmStore 的目录初始化、引用验证、两代 WAL 恢复、最新优先三态读写，学习笔记见 docs/manifest-codec.md、docs/manifest-file.md 与 docs/lsm-store.md。日志轮换、线程协调、背压和 flush 尚未实现，以下相应流程仍是后续设计。
 
 ## Goals / Non-Goals
 
@@ -29,6 +29,8 @@
 - `put(ByteKey, Value)`、`delete(ByteKey)`、`get(ByteKey): Optional<Entry>`。
 - `flush()`：等待调用前未发布的数据全部成为正式 SSTable，空库不创建空表文件。
 - `close()`：停止接收请求，等待已启动后台任务结束并关闭资源；不强制把剩余活跃表写成 SSTable，其 WAL 负责恢复。
+
+基础步骤当前仅实现 open(Path)、put/delete/get/close，保持前台单线程；尚不引入阈值配置、flush、锁和 worker。已恢复 frozen 表也只读保留，下一步再启动后台任务；不把这一中间状态宣称为完整阶段能力。
 
 前台 API 仍要求调用方串行使用，只新增内部后台并行。状态、MemTable 的访问、Manifest 提交、文件编号分配及查询均由同一锁串行化。后台仅在锁外构建冻结表对应的 SSTable，在锁内发布结果和唤醒等待者。读取器的 get/close 在锁内执行，避免修改现有 SsTableReader 的线程安全契约；不向调用方泄露内部表或 Reader。
 
@@ -109,6 +111,12 @@ close 进入 CLOSING，拒绝新调用，允许已启动 worker 完成发布，�
 ### 8. 恢复及崩溃窗口
 
 先验证 Manifest，再验证所有引用文件存在；禁止用 WalWriter 的“缺失即新建”语义补出被引用但丢失的 WAL。独占目录假设下进行存在性和类型检查，再使用已有恢复器；恢复失败不暴露实例并关闭全部资源。Manifest 内引用的 SSTable 打开后沿用按需数据块校验。
+
+本步实际命名为不补零的正十进制编号加 .wal/.sst，目录须存在，引用路径要求是普通文件且不接受内部符号链接。空目录先独占创建 1.wal 并同步头，再新建初始 Manifest；初始化中断保留产物。包内 FileOps 仅包装既有组件的创建/打开/追加，用于组合层错误注入；资源在工厂成功返回后由 LsmStore 统一持有，失败逆序关闭全部资源，原错误优先。
+
+为复用 WAL 扫描而不重复格式，新加 WalWriter.openExistingRecovering（READ/WRITE，无 CREATE，拒绝零字节）和 replaySealed（READ，精确封存长度，不修尾）。二者与旧入口共享同一扫描器，旧 openEmpty/openRecovering 的行为不变。先打开所有 SSTable 元信息和严格重放 frozen，最后恢复 active，降低已知其他引用异常时修改活跃日志的机会。逻辑字节量在内存应用与重放时共同维护，覆盖先减旧记录，WAL 同步成功后才更新活跃映射和统计。
+
+编号预留从当前状态与全部规范内部名称的最大值之后递增，超出 long 范围的保留名称拒绝打开，Long.MAX_VALUE 后分配失败；本步不清理孤儿。SSTable 新旧顺序只取 Manifest，未知名称保留。此时 allocateFileId 仅包内预留，不生成文件。
 
 若有 frozen WAL，分别重放 frozen 和 active 到独立表。frozen 是轮换前已同步关闭的日志，先要求文件大小精确等于 Manifest 中封存长度，再只读验证所有字节完整有效，不能按 active 的残尾规则修复；active 沿用现有 WAL 不完整尾部修复。打开成功前完成恢复，之后为 frozen 启动唯一后台任务。活跃表即使恢复后超过阈值也不拆出第三代，下一次写入按同一背压规则协调。
 

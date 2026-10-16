@@ -65,18 +65,63 @@ public final class WalWriter implements AutoCloseable {
         return open(io, true, replay);
     }
 
+    /**
+     * 恢复文件集已引用的活跃日志：必须已存在且有完整文件头，不自动创建或初始化。
+     * 完整记录及不完整尾部规则与 openRecovering 相同；调用方须独占文件。
+     */
+    public static WalWriter openExistingRecovering(Path path, Consumer<WalRecord> replay) throws IOException {
+        Objects.requireNonNull(path, "path");
+        Objects.requireNonNull(replay, "replay");
+        return open(FileChannelWalIo.openExisting(path), true, replay, false);
+    }
+
+    /**
+     * 只读重放已封存日志；长度必须精确匹配且所有记录完整有效，绝不修复尾部。
+     * replay 只能修改未暴露的临时状态，失败前可能已发生部分回调；方法负责关闭资源。
+     */
+    public static void replaySealed(Path path, long sealedLength, Consumer<WalRecord> replay)
+            throws IOException {
+        Objects.requireNonNull(path, "path");
+        Objects.requireNonNull(replay, "replay");
+        if (sealedLength < HEADER_SIZE) {
+            throw new IllegalArgumentException("Sealed WAL length is shorter than header");
+        }
+        replaySealed(FileChannelWalIo.openReadOnly(path), sealedLength, replay);
+    }
+
+    /** 包内严格重放故障注入入口，接管 io 所有权。 */
+    static void replaySealed(WalIo io, long sealedLength, Consumer<WalRecord> replay) throws IOException {
+        Objects.requireNonNull(io, "io");
+        try (io) {
+            Objects.requireNonNull(replay, "replay");
+            if (sealedLength < HEADER_SIZE) {
+                throw new IllegalArgumentException("Sealed WAL length is shorter than header");
+            }
+            if (io.size() != sealedLength) {
+                throw new IOException("Sealed WAL size does not match Manifest length");
+            }
+            long size = initializeOrValidateHeader(io, false);
+            scan(io, size, replay, false);
+        }
+    }
+
     private static WalWriter open(WalIo io, boolean recovering, Consumer<WalRecord> replay)
             throws IOException {
+        return open(io, recovering, replay, true);
+    }
+
+    private static WalWriter open(WalIo io, boolean recovering, Consumer<WalRecord> replay,
+                                  boolean allowInitialization) throws IOException {
         Objects.requireNonNull(io, "io");
         try {
             if (recovering) {
                 Objects.requireNonNull(replay, "replay");
             }
-            long size = initializeOrValidateHeader(io);
+            long size = initializeOrValidateHeader(io, allowInitialization);
             if (!recovering && size > HEADER_SIZE) {
                 throw new IOException("WAL contains records; recovery required before appending");
             }
-            long appendOffset = recovering ? scanAndRepair(io, size, replay) : HEADER_SIZE;
+            long appendOffset = recovering ? scan(io, size, replay, true) : HEADER_SIZE;
             return new WalWriter(io, appendOffset);
         } catch (IOException | RuntimeException | Error failure) {
             try {
@@ -88,10 +133,10 @@ public final class WalWriter implements AutoCloseable {
         }
     }
 
-    private static long initializeOrValidateHeader(WalIo io) throws IOException {
+    private static long initializeOrValidateHeader(WalIo io, boolean allowInitialization) throws IOException {
         long size = io.size();
         ByteBuffer header = ByteBuffer.allocate(HEADER_SIZE).order(ByteOrder.BIG_ENDIAN);
-        if (size == 0) {
+        if (size == 0 && allowInitialization) {
             header.putInt(MAGIC).putInt(VERSION).flip();
             writeFully(io, header, 0);
             io.force();
@@ -112,7 +157,7 @@ public final class WalWriter implements AutoCloseable {
         return size;
     }
 
-    private static long scanAndRepair(WalIo io, long size, Consumer<WalRecord> replay)
+    private static long scan(WalIo io, long size, Consumer<WalRecord> replay, boolean repairTail)
             throws IOException {
         long validEnd = HEADER_SIZE;
         ByteBuffer prefix = ByteBuffer.allocate(WalCodec.PREFIX_SIZE).order(ByteOrder.BIG_ENDIAN);
@@ -146,6 +191,9 @@ public final class WalWriter implements AutoCloseable {
             validEnd += frame.length; // 完整读取、校验并交给回调后，才确认新的有效边界。
         }
         if (validEnd < size) {
+            if (!repairTail) {
+                throw new EOFException("Incomplete sealed WAL record at offset " + validEnd);
+            }
             io.truncate(validEnd);
             io.force(); // 截断成功且同步成功后，才能返回可追加的 writer。
         }

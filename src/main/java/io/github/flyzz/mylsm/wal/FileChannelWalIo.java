@@ -21,6 +21,14 @@ final class FileChannelWalIo implements WalIo {
         return new FileChannelWalIo(FileChannel.open(path, CREATE, READ, WRITE));
     }
 
+    static FileChannelWalIo openExisting(Path path) throws IOException {
+        return new FileChannelWalIo(FileChannel.open(path, READ, WRITE));
+    }
+
+    static FileChannelWalIo openReadOnly(Path path) throws IOException {
+        return new FileChannelWalIo(FileChannel.open(path, READ));
+    }
+
     @Override
     public long size() throws IOException {
         return channel.size();

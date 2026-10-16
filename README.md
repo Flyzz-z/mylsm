@@ -4,7 +4,7 @@
 
 阶段 3 已完成并归档：支持 SSTable 编解码、新文件分块写入与失败清理、只读打开、三态点查和逐块有序遍历。见 [数据块笔记](docs/sstable-block.md)、[元信息笔记](docs/sstable-metadata.md)、[文件写入笔记](docs/sstable-writer.md)、[打开与点查笔记](docs/sstable-reader.md) 和 [有序遍历与阶段复盘](docs/sstable-scan.md)。
 
-阶段 4 已实现 Manifest、LsmStore 目录恢复与三态读写，以及单冻结表后台刷盘、阈值背压和安全关闭；见[编解码笔记](docs/manifest-codec.md)、[文件笔记](docs/manifest-file.md)、[目录恢复笔记](docs/lsm-store.md)和[后台刷盘笔记](docs/lsm-background-flush.md)。默认每表逻辑目标 4 MiB，可通过 open 重载配置。显式 flush、启动时的孤儿清理与完整阶段验收尚待完成，见[设计](openspec/changes/implement-minimal-lsm/design.md)和[任务](openspec/changes/implement-minimal-lsm/tasks.md)。
+阶段 4 已实现 Manifest、LsmStore 目录恢复与三态读写，以及单冻结表后台刷盘、阈值背压、显式 flush 和安全关闭；见[编解码笔记](docs/manifest-codec.md)、[文件笔记](docs/manifest-file.md)、[目录恢复笔记](docs/lsm-store.md)和[后台刷盘笔记](docs/lsm-background-flush.md)。默认每表逻辑目标 4 MiB，可通过 open 重载配置。启动时的孤儿清理与完整阶段验收尚待完成，见[设计](openspec/changes/implement-minimal-lsm/design.md)和[任务](openspec/changes/implement-minimal-lsm/tasks.md)。
 
 ## 环境与构建
 

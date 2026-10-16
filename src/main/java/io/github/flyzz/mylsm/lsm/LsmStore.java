@@ -191,6 +191,29 @@ public final class LsmStore implements AutoCloseable {
         }
     }
 
+    /**
+     * 等待调用前的内存数据全部发布为 SSTable，空表不生成文件。
+     * 先等已有冻结代，再轮换并等待非空活跃代；前台仍须串行调用。
+     * 后台失败抛 IOException；等待中断保留标志且不取消已开始的刷盘。
+     */
+    public void flush() throws IOException {
+        lock.lock();
+        try {
+            requireOpen();
+            while (frozen != null) {
+                awaitFlushProgress();
+            }
+            if (active.bytes != 0) {
+                rotate();
+                while (frozen != null) {
+                    awaitFlushProgress();
+                }
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private Optional<Entry> getRecord(ByteKey key) throws IOException {
         try {
             Optional<Entry> result = active.table.get(key);
@@ -220,19 +243,7 @@ public final class LsmStore implements AutoCloseable {
         active.bytesAfter(record); // 在可能等待或轮换之前拒绝非法参数。
         while (active.bytes >= targetBytes) {
             if (frozen != null) {
-                files.beforeWait();
-                try {
-                    changed.await();
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    InterruptedIOException error = new InterruptedIOException("Interrupted waiting for flush slot");
-                    error.initCause(interrupted);
-                    throw error;
-                }
-                if (state == State.FAILED) {
-                    throw new IOException("LSM failed while waiting for flush slot", failure);
-                }
-                requireOpen();
+                awaitFlushProgress();
             } else {
                 rotate();
             }
@@ -248,6 +259,23 @@ public final class LsmStore implements AutoCloseable {
         if (active.bytes >= targetBytes && frozen == null) {
             rotate();
         }
+    }
+
+    /** 调用者持锁；await 原子地释放锁等待，返回前重新持锁并检查生命周期。 */
+    private void awaitFlushProgress() throws IOException {
+        files.beforeWait();
+        try {
+            changed.await();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            InterruptedIOException error = new InterruptedIOException("Interrupted waiting for background flush");
+            error.initCause(interrupted);
+            throw error;
+        }
+        if (state == State.FAILED) {
+            throw new IOException("LSM failed while waiting for background flush", failure);
+        }
+        requireOpen();
     }
 
     /** 包内编号预留，不创建文件；轮换/输出创建仍须使用 CREATE_NEW。 */

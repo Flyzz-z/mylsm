@@ -4,7 +4,7 @@
 
 用户已确定采用后台刷盘：一个活跃表、最多一个冻结表、一个刷盘线程，冻结槽位忙且活跃表达到阈值时写入等待。本设计将其落到独立目录级入口，不改变旧组件的独立使用契约。除用户已选的并发模型外，下列格式、默认值和接口是本提案给出的具体方案，随对应实现小步讲解和验证。
 
-当前已完成 Manifest、LsmStore 目录恢复与三态读写、WAL 轮换、单工作线程刷盘发布、背压及关闭协调。学习笔记见 docs/manifest-codec.md、docs/manifest-file.md、docs/lsm-store.md 和 docs/lsm-background-flush.md。显式 flush、启动时孤儿清理和阶段验收仍待完成。
+当前已完成 Manifest、LsmStore 目录恢复与三态读写、WAL 轮换、单工作线程刷盘发布、背压、显式 flush 及关闭协调。学习笔记见 docs/manifest-codec.md、docs/manifest-file.md、docs/lsm-store.md 和 docs/lsm-background-flush.md。启动时孤儿清理和阶段验收仍待完成。
 
 ## Goals / Non-Goals
 
@@ -30,7 +30,7 @@
 - `flush()`：等待调用前未发布的数据全部成为正式 SSTable，空库不创建空表文件。
 - `close()`：停止接收请求，等待已启动后台任务结束并关闭资源；不强制把剩余活跃表写成 SSTable，其 WAL 负责恢复。
 
-当前实现 open(Path)、带正逻辑阈值的 open 重载、put/delete/get/close，默认目标 4 MiB。前台串行，一个内部 worker 在 open 成功恢复后启动，恢复的 frozen 会自动刷盘；显式 flush 仍待下一小步。
+当前实现 open(Path)、带正逻辑阈值的 open 重载、put/delete/get/flush/close，默认目标 4 MiB。前台串行，一个内部 worker 在 open 成功恢复后启动，恢复的 frozen 会自动刷盘。
 
 前台 API 仍要求调用方串行使用，只新增内部后台并行。状态、MemTable 的访问、Manifest 提交、文件编号分配及查询均由同一锁串行化。后台仅在锁外构建冻结表对应的 SSTable，在锁内发布结果和唤醒等待者。读取器的 get/close 在锁内执行，避免修改现有 SsTableReader 的线程安全契约；不向调用方泄露内部表或 Reader。
 
@@ -107,6 +107,8 @@ Manifest 描述进程崩溃下的恢复来源；新目录项和文件同步的�
 读顺序是 active → frozen（若有）→ SSTable 从新到旧。遇到 Value 或 Tombstone 均停止；仅 Optional.empty 才继续。文件错误使 LsmStore FAILED，不能跳过坏文件查旧值。不提供数据库级 scan，现有单文件 scan 也不直接作为多路合并接口。
 
 flush 在串行前台调用中，先等待已有冻结任务发布；然后若活跃表非空，轮换并等待该任务发布；返回时调用前的数据均已进入清单。后台错误使等待者得到 IOException，不能只检查“任务结束”就当成功。等待中断报告 InterruptedIOException 并恢复中断标志；没有文件错误时不单因调用方中断而丢弃冻结数据或将服务判坏。
+
+flush 已按两段 frozen 条件循环实现，复用 rotate 与 runWorker，不持锁等待文件构建或 join。共享 awaitFlushProgress 负责 Condition 等待、中断标志与生命周期检查，写入背压也使用此方法。空表和重复空 flush 不创建文件、不提交状态；返回只要求 SSTable 已发布，不要求旧 WAL 删除完成。两个等待位置的中断、两代构建/发布错误均用 latch 控制验证；已失败/关闭实例的新调用仍按既有状态异常拒绝。
 
 close 进入 CLOSING，拒绝新调用，允许已启动 worker 完成发布，锁外等待终止后再关闭活跃 WAL、SSTable Reader、Manifest。关闭等待不因中断提前释放后台仍使用的资源，完成后恢复中断标志。正常关闭无需刷剩余 active，重启由 WAL 恢复。FAILED 也可关闭，重复关闭安全，关闭报错后不再可用。
 

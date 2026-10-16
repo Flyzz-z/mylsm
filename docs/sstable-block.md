@@ -1,6 +1,6 @@
 # SSTable 第一步：记录与数据块
 
-本笔记记录第一个小步实现的 `SsTableRecord` 和包内 `SsTableBlockCodec`，能够把非空有序记录编码为完整数据块，再验证并解码回来。后续文件头/索引/Footer 编解码见 [元信息笔记](sstable-metadata.md)。文件写入、点查和 scan 尚未实现；本笔记不代表已有可使用的 SSTable 文件存储。
+本笔记记录第一个小步实现的 `SsTableRecord` 和包内 `SsTableBlockCodec`，能够把非空有序记录编码为完整数据块，再验证并解码回来。后续步骤见 [元信息笔记](sstable-metadata.md) 和 [文件写入笔记](sstable-writer.md)。点查与 scan 尚未实现。
 
 ## 记录状态与排序
 
@@ -92,4 +92,4 @@ encode 对 null 抛 NullPointerException，对空块、重复/逆序或超限抛
 
 本步通过 `./mvnw test`：新增长度与排序等测试用例 43 个，全项目共 248 个，无失败。覆盖固定格式、二进制和前缀键、不可变结果、每个帧截断边界、记录及多记录块恰好达上限/超限，以及重算合法 CRC 后的非法数量、长度、类型、删除载荷、重复键、逆序和未消耗字节。
 
-后续 Writer 使用这些块生成完整文件；元信息布局已在 [第二步](sstable-metadata.md) 验证，实际块内容与索引键的对应关系、文件 I/O、同步和失败清理将在对应小步验证。
+Writer 已使用这些块生成完整文件，见 [第三步](sstable-writer.md)；元信息布局见 [第二步](sstable-metadata.md)。实际块内容与索引键的对应关系在写入测试中验证，后续 Reader 还需在访问时校验。

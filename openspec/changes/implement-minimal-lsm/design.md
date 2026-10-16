@@ -4,6 +4,8 @@
 
 用户已确定采用后台刷盘：一个活跃表、最多一个冻结表、一个刷盘线程，冻结槽位忙且活跃表达到阈值时写入等待。本设计将其落到独立目录级入口，不改变旧组件的独立使用契约。除用户已选的并发模型外，下列格式、默认值和接口是本提案给出的具体方案，随对应实现小步讲解和验证。
 
+当前已完成第一个纯内存步骤：包内 ManifestState 与 ManifestCodec，学习笔记见 docs/manifest-codec.md。文件 I/O 和线程协调尚未实现，以下相应流程仍是后续设计。
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -57,6 +59,10 @@
 建议版本 1：大端序 Header=`MYMF`(4)+version(4)；后续为 `payloadLength(4)+CRC32C(4)+payload`。CRC 覆盖长度原始字节与 payload。payload 为 `revision(8)+activeWalId(8)+frozenWalId(8，0 表示无)+frozenWalLength(8)+sstCount(4)+sstId*(8)`，最小 36 字节、最大 16 MiB。无 frozen 时长度必须为 0，有 frozen 时长度至少容纳 WAL 文件头。编号为正、引用不重复，revision 从 1 开始严格连续；数量、长度、偏移及上限在分配前验证，精确消耗记录。文件列表顺序不要求编号递增。
 
 首个状态要求没有 frozen 且 SSTable 列表为空；后续只允许两类转换：无 frozen → 新 active、原 active 成为带封存长度的 frozen、SSTable 列表不变；或有 frozen → active 不变、清除 frozen 及其长度、SSTable 列表原前缀加一个新编号。拒绝其余转换与编号复用；恢复流式验证历史转换，不要求已经失效的历史文件仍在磁盘上。
+
+纯内存接口已具体化为不可变 `ManifestState(revision, activeWalId, frozenWalId, frozenWalLength, List<Long> sstIds)` 及包内 `ManifestCodec.encodeHeader/decodeHeader`、`encode(ManifestState): byte[]`、`decode(byte[]): ManifestState`。构造器复制列表并验证单态字段、引用唯一性和容量，requireInitial/requireSuccessor 另验历史位置与转换。新编号严格大于前一状态 maxFileId，合法历史中的上界不会下降，因而无需历史编号集合就能拒绝复用。查重采用独立 long[] 排序，不改变清单顺序。
+
+调用参数非法抛 NullPointerException/IllegalArgumentException（含构造超容量状态）；decode 的非法长度、CRC、数量、状态字段抛 IOException，合法帧缺字节抛 EOFException。decode 不验证历史；后续恢复层须将 requireInitial/requireSuccessor 的语义失败转换为文件 IOException，并在构造超容量提交前报告容量 I/O 错误。因为 payload 为 36+8*N，最大合法载荷为 16 MiB-4，最大编号数 2,097,147；数量精确匹配载荷后才分配列表。
 
 提交在状态锁内追加完整快照并 force，成功后才更新内存所采用的 Manifest 状态。短写循环，无进展或同步失败使实例 FAILED，不能继续提交或删除可能被引用的文件。完整有效记录即使先前 force 调用报错，重启也可以采用；失败不承诺回滚。
 

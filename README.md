@@ -4,7 +4,7 @@
 
 阶段 3 已完成并归档：支持 SSTable 编解码、新文件分块写入与失败清理、只读打开、三态点查和逐块有序遍历。见 [数据块笔记](docs/sstable-block.md)、[元信息笔记](docs/sstable-metadata.md)、[文件写入笔记](docs/sstable-writer.md)、[打开与点查笔记](docs/sstable-reader.md) 和 [有序遍历与阶段复盘](docs/sstable-scan.md)。
 
-阶段 4 已建立[最小 LSM 提案](openspec/changes/implement-minimal-lsm/proposal.md)，尚未实现：采用一个活跃 MemTable、最多一个冻结 MemTable、一个后台刷盘线程；冻结槽位忙且活跃表已满时写入等待。文件集提交、两代 WAL 恢复与分步实现见[设计](openspec/changes/implement-minimal-lsm/design.md)和[任务](openspec/changes/implement-minimal-lsm/tasks.md)。
+阶段 4 已开始：已实现 Manifest 的不可变状态、纯内存编解码与合法转换校验，见[学习笔记](docs/manifest-codec.md)。[最小 LSM 提案](openspec/changes/implement-minimal-lsm/proposal.md)采用一个活跃 MemTable、最多一个冻结 MemTable、一个后台刷盘线程；文件集 I/O、两代 WAL 恢复、背压及后台刷盘尚未实现，见[设计](openspec/changes/implement-minimal-lsm/design.md)和[任务](openspec/changes/implement-minimal-lsm/tasks.md)。
 
 ## 环境与构建
 
@@ -31,6 +31,7 @@ src/main/java/io/github/flyzz/mylsm/
   memtable/                          MemTable、TreeMapMemTable、MemTableRecord
   wal/                               WAL 编解码、同步追加与恢复修复、WalStore
   sstable/                           SSTable 编解码、文件构建、点查与有序遍历
+  lsm/                               Manifest 状态、编解码与合法转换校验
 src/test/java/io/github/flyzz/mylsm/  对应子包的 JUnit 测试
 docs/roadmap.md                       学习路线与每阶段节奏
 openspec/config.yaml                  项目背景与规范约定

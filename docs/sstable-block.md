@@ -1,6 +1,6 @@
 # SSTable 第一步：记录与数据块
 
-本笔记记录第一个小步实现的 `SsTableRecord` 和包内 `SsTableBlockCodec`，能够把非空有序记录编码为完整数据块，再验证并解码回来。后续步骤见 [元信息笔记](sstable-metadata.md)、[文件写入笔记](sstable-writer.md) 和 [打开与点查笔记](sstable-reader.md)。scan 尚未实现。
+本笔记记录第一个小步实现的 `SsTableRecord` 和包内 `SsTableBlockCodec`，能够把非空有序记录编码为完整数据块，再验证并解码回来。后续步骤见 [元信息笔记](sstable-metadata.md)、[文件写入笔记](sstable-writer.md)、[打开与点查笔记](sstable-reader.md) 和 [有序遍历笔记](sstable-scan.md)。
 
 ## 记录状态与排序
 

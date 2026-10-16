@@ -410,6 +410,214 @@ class SsTableReaderTest {
         assertEquals(1, input.closeCalls);
     }
 
+    @Test
+    void scansAnEmptyFileWithoutCallbacksOrDataReads() throws IOException {
+        Path path = directory.resolve("empty-scan.sst");
+        SsTableWriter.write(path, List.of());
+        RecordingInput input = new RecordingInput(path);
+        try (SsTableReader reader = SsTableReader.open(input)) {
+            input.clearReads();
+            List<SsTableRecord> records = new ArrayList<>();
+            reader.scan(records::add);
+            assertTrue(records.isEmpty());
+            assertTrue(input.readOffsets.isEmpty());
+        }
+    }
+
+    @Test
+    void scansEveryBinaryRecordAndTombstoneInOrderAcrossBlocks() throws IOException {
+        List<SsTableRecord> records = List.of(value(new byte[0], new byte[0]),
+                deletion(new byte[]{0}), value(new byte[]{0, 1}, new byte[3000]),
+                value(new byte[]{0, (byte) 0xff}, new byte[3000]), deletion(new byte[]{0x7f}),
+                value(new byte[]{(byte) 0x80}, new byte[0]), deletion(new byte[]{(byte) 0xff}));
+        Path path = directory.resolve("ordered-scan.sst");
+        SsTableWriter.write(path, records);
+        byte[] original = Files.readAllBytes(path);
+        assertTrue(index(original).size() > 1);
+        try (SsTableReader reader = SsTableReader.open(path)) {
+            List<SsTableRecord> first = new ArrayList<>();
+            reader.scan(first::add);
+            assertEquals(records, first);
+            List<SsTableRecord> second = new ArrayList<>();
+            reader.scan(second::add);
+            assertEquals(records, second);
+            for (SsTableRecord record : records) {
+                assertEquals(Optional.of(record.entry()), reader.get(record.key()));
+            }
+        }
+        assertArrayEquals(original, Files.readAllBytes(path));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void propagatesCallbackFailureWithoutInvalidatingOrPrefetchingLaterBlocks(boolean throwError) throws IOException {
+        Path path = threeBlockTable();
+        List<IndexEntry> entries = index(Files.readAllBytes(path));
+        RecordingInput input = new RecordingInput(path);
+        Throwable failure = throwError ? new AssertionError("callback failed")
+                : new IllegalArgumentException("callback failed");
+        try (SsTableReader reader = SsTableReader.open(input)) {
+            input.clearReads();
+            List<SsTableRecord> produced = new ArrayList<>();
+            assertSame(failure, assertThrows(failure.getClass(), () -> reader.scan(record -> {
+                produced.add(record);
+                assertEquals(key(new byte[]{1}), record.key());
+                assertTrue(input.readOffsets.stream().allMatch(offset -> offset >= entries.getFirst().offset()
+                        && offset < entries.get(1).offset()));
+                if (failure instanceof Error error) {
+                    throw error;
+                }
+                throw (RuntimeException) failure;
+            })));
+            assertEquals(1, produced.size()); // 已产生的回调副作用不回滚。
+            assertEquals(entries.getFirst().frameLength(), input.bytesRead);
+            assertTrue(reader.get(key(new byte[]{3})).isPresent());
+            List<SsTableRecord> retried = new ArrayList<>();
+            reader.scan(retried::add);
+            assertEquals(List.of(key(new byte[]{1}), key(new byte[]{2}), key(new byte[]{3})),
+                    retried.stream().map(SsTableRecord::key).toList());
+        }
+    }
+
+    @Test
+    void rejectsReentryAndCloseDuringCallbacksWithoutChangingReaderState() throws IOException {
+        RecordingInput input = new RecordingInput(sampleTable());
+        try (SsTableReader reader = SsTableReader.open(input)) {
+            List<SsTableRecord> produced = new ArrayList<>();
+            reader.scan(record -> {
+                assertThrows(IllegalStateException.class, () -> reader.get(record.key()));
+                assertThrows(IllegalStateException.class, () -> reader.scan(ignored -> {}));
+                assertThrows(IllegalStateException.class, reader::close);
+                assertEquals(0, input.closeCalls);
+                produced.add(record);
+            });
+            assertEquals(List.of(SAMPLE), produced);
+            assertEquals(Optional.of(SAMPLE.entry()), reader.get(SAMPLE.key()));
+        }
+        assertEquals(1, input.closeCalls);
+    }
+
+    @Test
+    void rejectsNullCallbackWithoutInvalidatingReader() throws IOException {
+        try (SsTableReader reader = SsTableReader.open(sampleTable())) {
+            assertThrows(NullPointerException.class, () -> reader.scan(null));
+            assertEquals(Optional.of(SAMPLE.entry()), reader.get(SAMPLE.key()));
+            List<SsTableRecord> records = new ArrayList<>();
+            reader.scan(records::add);
+            assertEquals(List.of(SAMPLE), records);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2})
+    void emitsOnlyEarlierValidBlocksWhenScanFindsCorruption(int brokenBlock) throws IOException {
+        Path path = threeBlockTable();
+        byte[] bytes = Files.readAllBytes(path);
+        List<IndexEntry> entries = index(bytes);
+        bytes[(int) entries.get(brokenBlock).offset() + 4] ^= 1;
+        Files.write(path, bytes);
+        try (SsTableReader reader = SsTableReader.open(path)) {
+            List<SsTableRecord> records = new ArrayList<>();
+            assertThrows(IOException.class, () -> reader.scan(records::add));
+            assertEquals(brokenBlock, records.size());
+            for (int i = 0; i < records.size(); i++) {
+                assertEquals(key(new byte[]{(byte) (i + 1)}), records.get(i).key());
+            }
+            assertThrows(IllegalStateException.class, () -> reader.get(key(new byte[]{1})));
+            assertThrows(IllegalStateException.class, () -> reader.scan(ignored -> {}));
+        }
+        assertArrayEquals(bytes, Files.readAllBytes(path));
+    }
+
+    @Test
+    void doesNotEmitPartOfAMalformedBlockWithValidChecksum() throws IOException {
+        Path path = writeBlocks(List.of(List.of(deletion(new byte[]{0x61})),
+                List.of(deletion(new byte[]{0x62}), deletion(new byte[]{0x63}))), List.of());
+        byte[] bytes = Files.readAllBytes(path);
+        IndexEntry second = index(bytes).get(1);
+        bytes[(int) second.offset() + 22] = 3; // 坏块的第二条 kind 非法，第一条本身仍合法。
+        updateFrameChecksum(bytes, (int) second.offset(), second.frameLength());
+        Files.write(path, bytes);
+        try (SsTableReader reader = SsTableReader.open(path)) {
+            List<SsTableRecord> records = new ArrayList<>();
+            assertThrows(IOException.class, () -> reader.scan(records::add));
+            assertEquals(List.of(deletion(new byte[]{0x61})), records);
+        }
+    }
+
+    @Test
+    void validatesCrossBlockOrderingBeforeCallingConsumer() throws IOException {
+        List<SsTableRecord> first = List.of(deletion(new byte[]{0x62}), deletion(new byte[]{0x64}));
+        Path path = writeBlocks(List.of(first,
+                List.of(deletion(new byte[]{0x63}), deletion(new byte[]{0x66}))), List.of());
+        try (SsTableReader reader = SsTableReader.open(path)) {
+            List<SsTableRecord> records = new ArrayList<>();
+            assertThrows(IOException.class, () -> reader.scan(records::add));
+            assertEquals(first, records);
+        }
+    }
+
+    @Test
+    void validatesIndexedMaximumBeforeCallingConsumer() throws IOException {
+        List<SsTableRecord> first = List.of(deletion(new byte[]{0x61}));
+        Path path = writeBlocks(List.of(first,
+                List.of(deletion(new byte[]{0x63}), deletion(new byte[]{0x65}))),
+                List.of(key(new byte[]{0x61}), key(new byte[]{0x64})));
+        try (SsTableReader reader = SsTableReader.open(path)) {
+            List<SsTableRecord> records = new ArrayList<>();
+            assertThrows(IOException.class, () -> reader.scan(records::add));
+            assertEquals(first, records);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"none", "error", "zero", "eof"})
+    @Timeout(3)
+    void handlesShortScanReadsAndLaterReadFailures(String mode) throws IOException {
+        List<SsTableRecord> first = List.of(deletion(new byte[]{1}));
+        List<SsTableRecord> second = List.of(deletion(new byte[]{2}));
+        Path path = writeBlocks(List.of(first, second), List.of());
+        long secondOffset = index(Files.readAllBytes(path)).get(1).offset();
+        RecordingInput input = new RecordingInput(path);
+        try (SsTableReader reader = SsTableReader.open(input)) {
+            input.maxRead = 2;
+            if (!mode.equals("none")) {
+                input.failureOffset = secondOffset;
+                input.failureMode = mode;
+            }
+            input.clearReads();
+            List<SsTableRecord> records = new ArrayList<>();
+            if (mode.equals("none")) {
+                reader.scan(records::add);
+                assertEquals(List.of(first.getFirst(), second.getFirst()), records);
+            } else {
+                assertThrows(IOException.class, () -> reader.scan(records::add));
+                assertEquals(first, records);
+                assertThrows(IllegalStateException.class, () -> reader.scan(ignored -> {}));
+            }
+            assertTrue(input.readOffsets.size() > 2);
+        }
+        assertEquals(1, input.closeCalls);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rejectsScanAfterCloseOrFailureWithoutCallbacks(boolean failed) throws IOException {
+        RecordingInput input = new RecordingInput(sampleTable());
+        SsTableReader reader = SsTableReader.open(input);
+        if (failed) {
+            input.failureOffset = 8;
+            assertThrows(IOException.class, () -> reader.get(SAMPLE.key()));
+        } else {
+            reader.close();
+        }
+        int[] callbacks = {0};
+        assertThrows(IllegalStateException.class, () -> reader.scan(ignored -> callbacks[0]++));
+        assertEquals(0, callbacks[0]);
+        reader.close();
+        assertEquals(1, input.closeCalls);
+    }
+
     private Path sampleTable() throws IOException {
         Path path = directory.resolve("sample.sst");
         SsTableWriter.write(path, List.of(SAMPLE));

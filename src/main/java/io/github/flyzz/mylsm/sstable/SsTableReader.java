@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 import static java.nio.file.StandardOpenOption.READ;
 
@@ -24,6 +25,7 @@ public final class SsTableReader implements AutoCloseable {
     private final ReadIo input;
     private final List<IndexEntry> index;
     private State state = State.OPEN;
+    private boolean scanning;
 
     private SsTableReader(ReadIo input, List<IndexEntry> index) {
         this.input = input;
@@ -72,12 +74,12 @@ public final class SsTableReader implements AutoCloseable {
     /**
      * 点查并保留 Value、Tombstone 与缺失三态；读取整个候选块并验证后才返回结果。
      *
-     * @throws IllegalStateException 如果实例已关闭或发生过文件错误
+     * @throws IllegalStateException 如果实例已关闭、发生过文件错误，或在 scan 回调中重入
      * @throws NullPointerException 如果 key 为 null；参数错误不使实例失效
      * @throws IOException 如果读取或块验证失败；此后仅允许 close
      */
     public Optional<Entry> get(ByteKey key) throws IOException {
-        requireOpen();
+        requireAvailable();
         Objects.requireNonNull(key, "key");
         int blockIndex = findBlock(key);
         if (blockIndex == index.size()) {
@@ -101,9 +103,47 @@ public final class SsTableReader implements AutoCloseable {
         }
     }
 
-    /** 先变为 CLOSED 再释放资源；关闭失败后仍不能使用，重复关闭不重复操作资源。 */
+    /**
+     * 按键顺序遍历，包括删除标记；每个块完成验证后才向回调产生记录。
+     * 文件错误使实例失效；回调自身抛错只终止本次遍历，不回滚已产生的副作用。
+     * 回调不得重入或关闭本 Reader，也不得修改正在读取的文件。
+     *
+     * @throws IllegalStateException 如果实例已关闭、已失败或正在 scan
+     * @throws NullPointerException 如果 consumer 为 null；参数错误不使实例失效
+     * @throws IOException 如果读取或块验证失败；此后仅允许 close
+     */
+    public void scan(Consumer<SsTableRecord> consumer) throws IOException {
+        requireAvailable();
+        Objects.requireNonNull(consumer, "consumer");
+        scanning = true;
+        try {
+            for (int blockIndex = 0; blockIndex < index.size(); blockIndex++) {
+                List<SsTableRecord> records;
+                try {
+                    records = readBlock(blockIndex);
+                } catch (IOException failure) {
+                    state = State.FAILED;
+                    throw failure;
+                }
+                // 回调放在读取错误的 catch 范围外，不能将回调失败误判为文件损坏。
+                for (SsTableRecord record : records) {
+                    consumer.accept(record);
+                }
+            }
+        } finally {
+            scanning = false;
+        }
+    }
+
+    /**
+     * 先变为 CLOSED 再释放资源；关闭失败后仍不能使用，重复关闭不重复操作资源。
+     * scan 回调期间禁止关闭，抛 IllegalStateException，不改变生命周期。
+     */
     @Override
     public void close() throws IOException {
+        if (scanning) {
+            throw new IllegalStateException("Cannot close SSTable reader during scan");
+        }
         if (state != State.CLOSED) {
             state = State.CLOSED;
             input.close();
@@ -139,9 +179,12 @@ public final class SsTableReader implements AutoCloseable {
         return records;
     }
 
-    private void requireOpen() {
+    private void requireAvailable() {
         if (state != State.OPEN) {
             throw new IllegalStateException("SSTable reader is " + state);
+        }
+        if (scanning) {
+            throw new IllegalStateException("Cannot reenter SSTable reader during scan");
         }
     }
 

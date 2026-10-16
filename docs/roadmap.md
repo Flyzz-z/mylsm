@@ -25,4 +25,4 @@
 
 当前已完成阶段 0、阶段 1 与阶段 2。内存部分包括字节键、记录模型、MemTable 基本操作及复制式有序快照，见 [键学习笔记](byte-key.md)、[记录学习笔记](entry-model.md)、[MemTable 学习笔记](memtable.md) 和 [快照与阶段复盘](memtable-snapshot.md)。WAL 部分包括编解码、文件头、同步追加、恢复扫描、残缺尾部修复及 WalStore 组合，见 [WAL 编解码笔记](wal-codec.md)、[文件写入笔记](wal-writer.md)、[恢复笔记](wal-recovery.md) 和 [存储组合与阶段复盘](wal-store.md)；已验证独立进程未正常关闭时的恢复，并完成复盘和归档。
 
-阶段 3 正在进行，已完成 SSTable 编解码、新文件写入、打开与点查，见 [数据块笔记](sstable-block.md)、[元信息笔记](sstable-metadata.md)、[文件写入笔记](sstable-writer.md) 和 [打开与点查笔记](sstable-reader.md)。尚未实现有序遍历；冻结和刷盘仍留在后续阶段。
+阶段 3 的功能已实现，阶段复盘与归档待收尾。SSTable 支持编解码、新文件写入、打开、三态点查与有序遍历，见 [数据块笔记](sstable-block.md)、[元信息笔记](sstable-metadata.md)、[文件写入笔记](sstable-writer.md)、[打开与点查笔记](sstable-reader.md) 和 [有序遍历笔记](sstable-scan.md)。冻结、自动刷盘、多文件版本选择与 WAL 回收仍留在后续阶段。

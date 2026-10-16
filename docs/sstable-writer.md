@@ -1,6 +1,6 @@
 # SSTable 第三步：构建真实文件
 
-本步新增公开入口 `SsTableWriter.write(Path, Iterable<SsTableRecord>)`，将已排序输入一次性写入新文件。父目录必须存在，输入可以为空，但必须按 ByteKey 的无符号字节字典序严格递增。后续点查见 [Reader 笔记](sstable-reader.md)，scan 尚未实现。
+本步新增公开入口 `SsTableWriter.write(Path, Iterable<SsTableRecord>)`，将已排序输入一次性写入新文件。父目录必须存在，输入可以为空，但必须按 ByteKey 的无符号字节字典序严格递增。后续读取见 [Reader 笔记](sstable-reader.md) 和 [有序遍历笔记](sstable-scan.md)。
 
 ## 写入的数据流
 

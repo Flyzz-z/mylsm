@@ -66,11 +66,7 @@ final class ManifestCodec {
         }
         ByteBuffer buffer = ByteBuffer.wrap(frame).order(ByteOrder.BIG_ENDIAN);
         int payloadLength = buffer.getInt();
-        if (payloadLength < MIN_PAYLOAD_SIZE || payloadLength > MAX_PAYLOAD_SIZE
-                || (payloadLength - MIN_PAYLOAD_SIZE) % Long.BYTES != 0) {
-            throw new IOException("Invalid Manifest payload length: " + payloadLength);
-        }
-        requireExactLength(frame, PREFIX_SIZE + payloadLength, "frame");
+        requireExactLength(frame, checkedFrameLength(payloadLength), "frame");
         if (buffer.getInt() != checksum(frame, payloadLength)) {
             throw new IOException("Manifest checksum mismatch");
         }
@@ -93,6 +89,15 @@ final class ManifestCodec {
         } catch (IllegalArgumentException failure) {
             throw new IOException("Invalid Manifest state: " + failure.getMessage(), failure);
         }
+    }
+
+    /** 文件扫描器在按声明长度分配、或判定残尾之前复用相同的格式边界。 */
+    static int checkedFrameLength(int payloadLength) throws IOException {
+        if (payloadLength < MIN_PAYLOAD_SIZE || payloadLength > MAX_PAYLOAD_SIZE
+                || (payloadLength - MIN_PAYLOAD_SIZE) % Long.BYTES != 0) {
+            throw new IOException("Invalid Manifest payload length: " + payloadLength);
+        }
+        return PREFIX_SIZE + payloadLength;
     }
 
     private static int checksum(byte[] frame, int payloadLength) {

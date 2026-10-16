@@ -4,7 +4,7 @@
 
 用户已确定采用后台刷盘：一个活跃表、最多一个冻结表、一个刷盘线程，冻结槽位忙且活跃表达到阈值时写入等待。本设计将其落到独立目录级入口，不改变旧组件的独立使用契约。除用户已选的并发模型外，下列格式、默认值和接口是本提案给出的具体方案，随对应实现小步讲解和验证。
 
-当前已完成第一个纯内存步骤：包内 ManifestState 与 ManifestCodec，学习笔记见 docs/manifest-codec.md。文件 I/O 和线程协调尚未实现，以下相应流程仍是后续设计。
+当前已完成包内 ManifestState/ManifestCodec，以及 ManifestFile/ManifestIo 的文件追加、同步与恢复，学习笔记见 docs/manifest-codec.md 和 docs/manifest-file.md。目录级恢复、日志轮换和线程协调尚未实现，以下相应流程仍是后续设计。
 
 ## Goals / Non-Goals
 
@@ -69,6 +69,10 @@
 恢复按序校验所有完整记录，采用最后有效状态。不完整末尾前缀或合法长度下的残缺 payload 可以截去并同步；完整记录 CRC/语义错误、非法长度或不完整文件头均明确失败，不回退到更早状态伪装成功。已存在但没有任何完整状态的 Manifest 不能作为空库初始化。初始化仅面向空目录：先新建并同步初始 WAL，再建立并同步 Header 与首个状态；中断留下的未初始化目录拒绝打开，保留文件供显式处理，不静默覆盖。
 
 Manifest 描述进程崩溃下的恢复来源；新目录项和文件同步的断电语义不在承诺内。
+
+本步文件接口具体化为包内 `ManifestFile.create(Path, ManifestState)`、`open(Path)`、`append(ManifestState)`、`current()`、`close()`。create 先验证初始状态，再使用 CREATE_NEW；open 不带 CREATE。包内 ManifestIo 注入 size/read/write/truncate/force/close，默认代理 FileChannel。初始化失败关闭资源并保留文件，已有路径不改；打开失败不暴露实例，关闭错误 suppressed。参数/转换错误在 I/O 前拒绝，不使实例失效；追加开始后错误使实例 FAILED，current 也不能继续读取旧缓存，close 可重复且先置 CLOSED。
+
+恢复逐帧读取，只保存前一有效状态，长度验证复用 codec 的 checkedFrameLength。完整帧错误带起始偏移，实际读取失败不当成残尾；没有首个有效状态时不截断。截尾后 force 成功才返回，正常完整恢复不重写文件。合法声明长度超过剩余字节时按残尾处理，这也可能包含某些长度字段损坏，不能承诺区分所有损坏和截断。本步不验证真实引用文件、不回收 WAL，也不提供线程锁；这些职责仍在后续目录层。
 
 ### 5. 日志切换：先记录两代，再接纳新写入
 

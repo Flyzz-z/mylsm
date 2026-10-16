@@ -27,4 +27,4 @@
 
 阶段 3 已完成复盘与归档。SSTable 支持编解码、新文件写入、打开、三态点查与有序遍历，见 [数据块笔记](sstable-block.md)、[元信息笔记](sstable-metadata.md)、[文件写入笔记](sstable-writer.md)、[打开与点查笔记](sstable-reader.md) 和 [有序遍历与阶段复盘](sstable-scan.md)。冻结、自动刷盘、多文件版本选择与 WAL 回收仍留在后续阶段。
 
-阶段 4 已开始，见[设计](../openspec/changes/implement-minimal-lsm/design.md)与[任务](../openspec/changes/implement-minimal-lsm/tasks.md)。已确定一个活跃表、最多一个冻结表、一个后台刷盘线程，以及活跃表已满时等待冻结槽位的背压规则；已实现 [Manifest 状态与纯内存编解码](manifest-codec.md)，文件集 I/O 与恢复、轮换和后台发布仍待后续小步实现。
+阶段 4 已开始，见[设计](../openspec/changes/implement-minimal-lsm/design.md)与[任务](../openspec/changes/implement-minimal-lsm/tasks.md)。已确定一个活跃表、最多一个冻结表、一个后台刷盘线程，以及活跃表已满时等待冻结槽位的背压规则；已实现 [Manifest 状态与编解码](manifest-codec.md)及[元信息文件追加、同步与恢复](manifest-file.md)，目录恢复、两代 WAL 组合、轮换和后台发布仍待后续小步实现。

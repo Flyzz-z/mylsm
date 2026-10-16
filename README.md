@@ -4,7 +4,7 @@
 
 阶段 3 已完成并归档：支持 SSTable 编解码、新文件分块写入与失败清理、只读打开、三态点查和逐块有序遍历。见 [数据块笔记](docs/sstable-block.md)、[元信息笔记](docs/sstable-metadata.md)、[文件写入笔记](docs/sstable-writer.md)、[打开与点查笔记](docs/sstable-reader.md) 和 [有序遍历与阶段复盘](docs/sstable-scan.md)。
 
-阶段 4 已实现 Manifest、LsmStore 目录恢复与三态读写，以及单冻结表后台刷盘、阈值背压、显式 flush、安全关闭和启动时的内部孤儿清理；见[编解码笔记](docs/manifest-codec.md)、[文件笔记](docs/manifest-file.md)、[目录恢复笔记](docs/lsm-store.md)和[后台刷盘笔记](docs/lsm-background-flush.md)。默认每表逻辑目标 4 MiB，可通过 open 重载配置。已通过[独立进程退出恢复验证](docs/lsm-process-recovery.md)，不承诺断电一致性；阶段复盘和规范同步归档尚待完成，见[设计](openspec/changes/implement-minimal-lsm/design.md)和[任务](openspec/changes/implement-minimal-lsm/tasks.md)。
+阶段 4 已完成复盘与归档：支持 Manifest、LsmStore 目录恢复与三态读写、单冻结表后台刷盘、阈值背压、显式 flush、安全关闭和启动时的内部孤儿清理。见[编解码笔记](docs/manifest-codec.md)、[文件笔记](docs/manifest-file.md)、[目录恢复笔记](docs/lsm-store.md)、[后台刷盘笔记](docs/lsm-background-flush.md)和[阶段复盘](docs/lsm-review.md)。默认每表逻辑目标 4 MiB，可通过 open 重载配置；已通过[独立进程退出恢复验证](docs/lsm-process-recovery.md)，不承诺断电一致性。正式规范见 [lsm-store](openspec/specs/lsm-store/spec.md) 和 [lsm-manifest](openspec/specs/lsm-manifest/spec.md)，阶段记录见[归档设计](openspec/changes/archive/2026-10-16-implement-minimal-lsm/design.md)和[归档任务](openspec/changes/archive/2026-10-16-implement-minimal-lsm/tasks.md)。
 
 ## 环境与构建
 

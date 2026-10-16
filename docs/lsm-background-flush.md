@@ -1,6 +1,6 @@
 # 单冻结表与后台刷盘
 
-LsmStore 按逻辑字节目标轮换 WAL、冻结内存表，并由唯一后台线程构建和发布 SSTable。恢复时若 Manifest 引用冻结 WAL，也会重新启动同一刷盘流程。后续已补充显式 flush、[启动时的内部孤儿清理](lsm-store.md#启动时的孤儿清理)和[独立进程退出验收](lsm-process-recovery.md)；阶段复盘与规范同步归档仍待完成。
+LsmStore 按逻辑字节目标轮换 WAL、冻结内存表，并由唯一后台线程构建和发布 SSTable。恢复时若 Manifest 引用冻结 WAL，也会重新启动同一刷盘流程。后续已补充显式 flush、[启动时的内部孤儿清理](lsm-store.md#启动时的孤儿清理)和[独立进程退出验收](lsm-process-recovery.md)，并完成[阶段复盘](lsm-review.md)与规范同步归档。
 
 ## 前台与后台如何分工
 

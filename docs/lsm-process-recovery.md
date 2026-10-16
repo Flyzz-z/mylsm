@@ -33,8 +33,8 @@ LsmStoreProcessTest 用独立 JVM 运行真实 LsmStore，在指定协议边界�
 
 ## 验证范围
 
-本小步新增 6 个独立进程用例；`./mvnw test` 与 `./mvnw clean verify` 均通过全项目 527 个测试，`openspec validate --all --strict --no-interactive` 通过全部 7 项验证。已有组件测试覆盖逐字节残尾、完整损坏、短读写及同步失败，已有组合测试覆盖背压、等待中断、后台失败唤醒和关闭协调。
+本小步新增 6 个独立进程用例；`./mvnw test` 与 `./mvnw clean verify` 均通过全项目 527 个测试，`openspec validate --all --strict --no-interactive` 在本小步完成时通过全部 7 项验证。已有组件测试覆盖逐字节残尾、完整损坏、短读写及同步失败，已有组合测试覆盖背压、等待中断、后台失败唤醒和关闭协调。
 
 这些用例验证协议边界上的进程直接退出：操作系统和文件系统仍在运行。它们没有模拟机器断电、新目录项丢失或所有可能的系统调用中途退出；当前也没有父目录 fsync 协议，不能据此承诺断电一致性。目录仍要求单实例独占，前台调用串行。
 
-当前已完成最小 LSM 的实现与恢复验收；阶段复盘及规范同步归档仍待完成。压缩、全库 scan、Bloom Filter、MVCC 和通用多前台线程接口留给后续独立阶段。
+当前已完成最小 LSM 的实现、恢复验收、[阶段复盘](lsm-review.md)及规范同步归档。压缩、全库 scan、Bloom Filter、MVCC 和通用多前台线程接口留给后续独立阶段。

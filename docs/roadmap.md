@@ -25,6 +25,6 @@
 
 当前已完成阶段 0、阶段 1 与阶段 2。内存部分包括字节键、记录模型、MemTable 基本操作及复制式有序快照，见 [键学习笔记](byte-key.md)、[记录学习笔记](entry-model.md)、[MemTable 学习笔记](memtable.md) 和 [快照与阶段复盘](memtable-snapshot.md)。WAL 部分包括编解码、文件头、同步追加、恢复扫描、残缺尾部修复及 WalStore 组合，见 [WAL 编解码笔记](wal-codec.md)、[文件写入笔记](wal-writer.md)、[恢复笔记](wal-recovery.md) 和 [存储组合与阶段复盘](wal-store.md)；已验证独立进程未正常关闭时的恢复，并完成复盘和归档。
 
-阶段 3 已完成复盘与归档。SSTable 支持编解码、新文件写入、打开、三态点查与有序遍历，见 [数据块笔记](sstable-block.md)、[元信息笔记](sstable-metadata.md)、[文件写入笔记](sstable-writer.md)、[打开与点查笔记](sstable-reader.md) 和 [有序遍历与阶段复盘](sstable-scan.md)。冻结、自动刷盘、多文件版本选择与 WAL 回收仍留在后续阶段。
+阶段 3 已完成复盘与归档。SSTable 支持编解码、新文件写入、打开、三态点查与有序遍历，见 [数据块笔记](sstable-block.md)、[元信息笔记](sstable-metadata.md)、[文件写入笔记](sstable-writer.md)、[打开与点查笔记](sstable-reader.md) 和 [有序遍历与阶段复盘](sstable-scan.md)。冻结、自动刷盘、多文件版本选择与 WAL 回收已在阶段 4 接入。
 
-阶段 4 已实现 [Manifest 编解码](manifest-codec.md)、[元信息文件恢复](manifest-file.md)、[LsmStore 目录恢复与基础读写](lsm-store.md)，以及[单冻结表后台刷盘、背压、显式 flush 和关闭协调](lsm-background-flush.md)。启动时孤儿清理与[独立进程退出验收](lsm-process-recovery.md)已完成，剩余复盘和规范同步归档，见[设计](../openspec/changes/implement-minimal-lsm/design.md)与[任务](../openspec/changes/implement-minimal-lsm/tasks.md)。
+阶段 4 已完成实现、验收、[复盘](lsm-review.md)及归档。包含 [Manifest 编解码](manifest-codec.md)、[元信息文件恢复](manifest-file.md)、[LsmStore 目录恢复与基础读写](lsm-store.md)、[单冻结表后台刷盘、背压、显式 flush 和关闭协调](lsm-background-flush.md)，以及启动时孤儿清理与[独立进程退出验收](lsm-process-recovery.md)。正式规范为 [lsm-store](../openspec/specs/lsm-store/spec.md) 与 [lsm-manifest](../openspec/specs/lsm-manifest/spec.md)，阶段记录见[归档设计](../openspec/changes/archive/2026-10-16-implement-minimal-lsm/design.md)与[归档任务](../openspec/changes/archive/2026-10-16-implement-minimal-lsm/tasks.md)。下一候选阶段是压缩，尚未开始设计或实现。

@@ -2,7 +2,7 @@
 
 使用 **Java 21** 分阶段实现 LSM Tree，由你指挥 AI 逐步实现核心算法，在理解设计、代码与取舍的过程中学习存储引擎。当前已完成环境初始化、不可变字节模型和基于 TreeMap 的 MemTable（put/get/delete/snapshot），已完成阶段 1 的内存 KV 范围；阶段 2 已完成 WAL 编解码、同步追加、恢复扫描、残缺尾部修复及 WalStore 组合入口，支持单线程读写与重新打开恢复，已复盘并归档。
 
-阶段 3 的功能已实现，待阶段复盘与归档：支持 SSTable 编解码、新文件分块写入与失败清理、只读打开、三态点查和逐块有序遍历。见 [数据块笔记](docs/sstable-block.md)、[元信息笔记](docs/sstable-metadata.md)、[文件写入笔记](docs/sstable-writer.md)、[打开与点查笔记](docs/sstable-reader.md) 和 [有序遍历笔记](docs/sstable-scan.md)。
+阶段 3 已完成并归档：支持 SSTable 编解码、新文件分块写入与失败清理、只读打开、三态点查和逐块有序遍历。见 [数据块笔记](docs/sstable-block.md)、[元信息笔记](docs/sstable-metadata.md)、[文件写入笔记](docs/sstable-writer.md)、[打开与点查笔记](docs/sstable-reader.md) 和 [有序遍历与阶段复盘](docs/sstable-scan.md)。
 
 ## 环境与构建
 

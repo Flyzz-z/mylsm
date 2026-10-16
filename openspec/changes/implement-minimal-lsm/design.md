@@ -4,7 +4,7 @@
 
 用户已确定采用后台刷盘：一个活跃表、最多一个冻结表、一个刷盘线程，冻结槽位忙且活跃表达到阈值时写入等待。本设计将其落到独立目录级入口，不改变旧组件的独立使用契约。除用户已选的并发模型外，下列格式、默认值和接口是本提案给出的具体方案，随对应实现小步讲解和验证。
 
-当前已完成 Manifest、LsmStore 目录恢复与三态读写、WAL 轮换、单工作线程刷盘发布、背压、显式 flush 及关闭协调。学习笔记见 docs/manifest-codec.md、docs/manifest-file.md、docs/lsm-store.md 和 docs/lsm-background-flush.md。启动时孤儿清理和阶段验收仍待完成。
+当前已完成 Manifest、LsmStore 目录恢复与三态读写、WAL 轮换、单工作线程刷盘发布、背压、显式 flush 及关闭协调。学习笔记见 docs/manifest-codec.md、docs/manifest-file.md、docs/lsm-store.md 和 docs/lsm-background-flush.md。启动时孤儿清理已完成，组合进程退出验收与阶段复盘仍待完成。
 
 ## Goals / Non-Goals
 
@@ -122,7 +122,7 @@ close 进入 CLOSING，拒绝新调用，允许已启动 worker 完成发布，�
 
 为复用 WAL 扫描而不重复格式，新加 WalWriter.openExistingRecovering（READ/WRITE，无 CREATE，拒绝零字节）和 replaySealed（READ，精确封存长度，不修尾）。二者与旧入口共享同一扫描器，旧 openEmpty/openRecovering 的行为不变。先打开所有 SSTable 元信息和严格重放 frozen，最后恢复 active，降低已知其他引用异常时修改活跃日志的机会。逻辑字节量在内存应用与重放时共同维护，覆盖先减旧记录，WAL 同步成功后才更新活跃映射和统计。
 
-编号预留从当前状态与全部规范内部名称的最大值之后递增，超出 long 范围的保留名称拒绝打开，Long.MAX_VALUE 后分配失败；本步不清理孤儿。SSTable 新旧顺序只取 Manifest，未知名称保留。此时 allocateFileId 仅包内预留，不生成文件。
+编号预留从当前状态与全部规范内部名称的最大值之后递增，超出 long 范围的保留名称拒绝打开，Long.MAX_VALUE 后分配失败；启动清理后本次运行仍保留扫描到的最大编号。SSTable 新旧顺序只取 Manifest，未知名称保留。此时 allocateFileId 仅包内预留，不生成文件。
 
 若有 frozen WAL，分别重放 frozen 和 active 到独立表。frozen 是轮换前已同步关闭的日志，先要求文件大小精确等于 Manifest 中封存长度，再只读验证所有字节完整有效，不能按 active 的残尾规则修复；active 沿用现有 WAL 不完整尾部修复。打开成功前完成恢复，之后为 frozen 启动唯一后台任务。活跃表即使恢复后超过阈值也不拆出第三代，下一次写入按同一背压规则协调。
 
@@ -133,7 +133,7 @@ close 进入 CLOSING，拒绝新调用，允许已启动 worker 完成发布，�
 | SSTable 写入中或已完整，发布状态尚未完整记录 | frozen WAL + active WAL；忽略未引用 SSTable |
 | 发布状态完整，旧 WAL 尚未删除 | 已发布 SSTable + active WAL；忽略旧 WAL |
 
-在完成引用验证后，可以清理保留命名空间中不被最新状态引用的孤儿；未知文件不删。初始化不完整或引用验证失败时不执行孤儿清理。编号分配先考虑全部现有编号，避免清理失败引起重用。清理不是恢复正确性的前置条件。
+启动清理在全部引用路径检查、SSTable 元信息打开和两代 WAL 恢复成功后、工作线程启动前执行。按完整文件名区分 WAL/SSTable 引用，仅删除规范命名且无引用的普通文件，不跟随符号链接、不递归目录；未知名称、目录和符号链接保留。初始化不完整或恢复失败时不清理。单个删除失败继续处理其他文件，目录枚举或关闭失败也不阻止打开；错误仅留下孤儿，不改变有效文件集，下次打开可重试。编号分配先记录全部现有编号，本次运行不因删除高编号孤儿而复用编号。SSTable 数据块仍按需验证，清理不额外全表校验，也不依据孤儿内容猜测恢复来源。
 
 ### 9. 分步实现与验证边界
 

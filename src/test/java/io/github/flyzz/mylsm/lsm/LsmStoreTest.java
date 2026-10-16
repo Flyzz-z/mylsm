@@ -136,10 +136,13 @@ class LsmStoreTest {
     @ValueSource(strings = {"6.wal", "4.wal", "3.sst", "5.sst", "MANIFEST"})
     void refusesMissingReferencesInsteadOfCreatingEmptyFiles(String missing) throws IOException {
         seedTwoTablesAndFrozen();
+        Path orphan = directory.resolve("100.sst");
+        Files.write(orphan, new byte[]{7});
         Path path = directory.resolve(missing);
         Files.delete(path);
         assertThrows(IOException.class, () -> LsmStore.open(directory));
         assertFalse(Files.exists(path));
+        assertArrayEquals(new byte[]{7}, Files.readAllBytes(orphan));
     }
 
     @ParameterizedTest
@@ -171,6 +174,8 @@ class LsmStoreTest {
     void rejectsEveryIncompleteInitializationManifestWithoutOverwritingTheWal() throws IOException {
         Path path = directory.resolve("MANIFEST");
         byte[] wal = writeLog(directory.resolve("1.wal"), new WalRecord(key("k"), value("1")));
+        Path orphan = directory.resolve("100.sst");
+        Files.write(orphan, new byte[]{7});
         byte[] full = ByteBuffer.allocate(52).put(ManifestCodec.encodeHeader())
                 .put(ManifestCodec.encode(new ManifestState(1, 1, 0, 0, List.of()))).array();
         for (int length = 0; length < full.length; length++) {
@@ -179,6 +184,7 @@ class LsmStoreTest {
             assertThrows(IOException.class, () -> LsmStore.open(directory));
             assertArrayEquals(bytes, Files.readAllBytes(path));
             assertArrayEquals(wal, Files.readAllBytes(directory.resolve("1.wal")));
+            assertArrayEquals(new byte[]{7}, Files.readAllBytes(orphan));
         }
     }
 
@@ -265,7 +271,7 @@ class LsmStoreTest {
     }
 
     @Test
-    void ignoresOrphansButAllocatesPastAllCanonicalInternalNames() throws IOException {
+    void cleansOrphansButAllocatesPastAllCanonicalInternalNames() throws IOException {
         seedTwoTablesAndFrozen();
         Files.write(directory.resolve("999.wal"), new byte[]{7});
         Files.write(directory.resolve("1000.sst"), new byte[]{8});
@@ -278,8 +284,8 @@ class LsmStoreTest {
             assertEquals(1002, store.allocateFileId());
             assertEquals(1003, store.allocateFileId());
         }
-        assertArrayEquals(new byte[]{7}, Files.readAllBytes(directory.resolve("999.wal")));
-        assertArrayEquals(new byte[]{8}, Files.readAllBytes(directory.resolve("1000.sst")));
+        assertFalse(Files.exists(directory.resolve("999.wal")));
+        assertFalse(Files.exists(directory.resolve("1000.sst")));
         assertArrayEquals(new byte[]{9}, Files.readAllBytes(directory.resolve("notes.txt")));
         assertArrayEquals(new byte[]{10}, Files.readAllBytes(directory.resolve("0007.wal")));
     }
@@ -293,6 +299,8 @@ class LsmStoreTest {
             assertThrows(IOException.class, store::allocateFileId);
             assertEquals(Optional.empty(), store.get(key("missing")));
         }
+        assertFalse(Files.exists(last));
+        Files.write(last, new byte[]{7});
         Path tooLarge = directory.resolve("9223372036854775808.sst");
         Files.write(tooLarge, new byte[]{8});
         assertThrows(IOException.class, () -> LsmStore.open(directory));
@@ -353,6 +361,8 @@ class LsmStoreTest {
     @ValueSource(booleans = {false, true})
     void openingFailureClosesManifestAndEveryPreviouslyOpenedTable(boolean failWal) throws IOException {
         seedTwoTablesAndFrozen();
+        Path orphan = directory.resolve("100.sst");
+        Files.write(orphan, new byte[]{7});
         TrackingFiles files = new TrackingFiles();
         files.failOpenWal = failWal;
         files.failSecondTable = !failWal;
@@ -361,6 +371,134 @@ class LsmStoreTest {
         assertEquals(failWal ? 2 : 1, files.readers.size());
         for (SsTableReader reader : files.readers) {
             assertThrows(IllegalStateException.class, () -> reader.get(key("a")));
+        }
+        assertArrayEquals(new byte[]{7}, Files.readAllBytes(orphan));
+    }
+
+    @Test
+    void cleansOnlyUnreferencedRegularInternalFilesBeforeResumingFrozenFlush() throws IOException {
+        seedTwoTablesAndFrozen();
+        byte[] active = Files.readAllBytes(directory.resolve("6.wal"));
+        byte[] frozen = Files.readAllBytes(directory.resolve("4.wal"));
+        byte[] firstTable = Files.readAllBytes(directory.resolve("3.sst"));
+        byte[] secondTable = Files.readAllBytes(directory.resolve("5.sst"));
+        byte[] manifest = Files.readAllBytes(directory.resolve("MANIFEST"));
+        // 同编号的另一种后缀不是引用；完整未发布 SSTable 也必须删除。
+        for (String name : List.of("3.wal", "5.wal", "4.sst", "6.sst", "100.sst")) {
+            Files.write(directory.resolve(name), new byte[]{7});
+        }
+        SsTableWriter.write(directory.resolve("101.sst"), List.of(sst("a", value("wrong"))));
+        List<String> unknown = List.of("notes.txt", "0007.wal", "0.sst", "-1.wal", "7.SST", "8.sst.tmp");
+        for (String name : unknown) {
+            Files.write(directory.resolve(name), new byte[]{9});
+        }
+        Files.createDirectory(directory.resolve("102.wal"));
+        Files.write(directory.resolve("102.wal/keep"), new byte[]{10});
+        Files.createSymbolicLink(directory.resolve("103.sst"), Path.of("notes.txt"));
+        Files.createSymbolicLink(directory.resolve("104.wal"), Path.of("missing"));
+        PausedFiles paused = new PausedFiles();
+        try (LsmStore store = LsmStore.open(directory, paused); PausedFiles release = paused) {
+            paused.awaitStarted();
+            for (String name : List.of("3.wal", "5.wal", "4.sst", "6.sst", "100.sst", "101.sst")) {
+                assertFalse(Files.exists(directory.resolve(name)), name);
+            }
+            assertArrayEquals(active, Files.readAllBytes(directory.resolve("6.wal")));
+            assertArrayEquals(frozen, Files.readAllBytes(directory.resolve("4.wal")));
+            assertArrayEquals(firstTable, Files.readAllBytes(directory.resolve("3.sst")));
+            assertArrayEquals(secondTable, Files.readAllBytes(directory.resolve("5.sst")));
+            assertArrayEquals(manifest, Files.readAllBytes(directory.resolve("MANIFEST")));
+            assertEquals(Optional.of(value("1")), store.get(key("a")));
+        }
+        for (String name : unknown) {
+            assertArrayEquals(new byte[]{9}, Files.readAllBytes(directory.resolve(name)));
+        }
+        assertArrayEquals(new byte[]{10}, Files.readAllBytes(directory.resolve("102.wal/keep")));
+        assertEquals(Path.of("notes.txt"), Files.readSymbolicLink(directory.resolve("103.sst")));
+        assertEquals(Path.of("missing"), Files.readSymbolicLink(directory.resolve("104.wal")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"MANIFEST", "3.sst", "4.wal", "6.wal"})
+    void recoveryCorruptionNeverTriggersOrphanCleanup(String name) throws IOException {
+        seedTwoTablesAndFrozen();
+        Path orphan = directory.resolve("100.sst");
+        Files.write(orphan, new byte[]{7});
+        Files.write(directory.resolve(name), new byte[]{8});
+        assertThrows(IOException.class, () -> LsmStore.open(directory));
+        assertArrayEquals(new byte[]{7}, Files.readAllBytes(orphan));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedOrphanDeletionDoesNotBlockOtherCleanupOrReadsAndRetriesOnNextOpen(boolean runtime)
+            throws IOException {
+        try (LsmStore store = LsmStore.open(directory)) {
+            store.put(key("k"), value("1"));
+        }
+        Path retained = directory.resolve("100.sst");
+        Path deleted = directory.resolve("101.wal");
+        Files.write(retained, new byte[]{7});
+        Files.write(deleted, new byte[]{8});
+        LsmStore.FileOps files = new LsmStore.FileOps() {
+            @Override
+            void deleteObsolete(Path path) throws IOException {
+                if (path.equals(retained)) {
+                    if (runtime) { throw new SecurityException("injected delete denial"); }
+                    throw new IOException("injected delete failure");
+                }
+                super.deleteObsolete(path);
+            }
+        };
+        try (LsmStore store = LsmStore.open(directory, files)) {
+            assertArrayEquals(new byte[]{7}, Files.readAllBytes(retained));
+            assertFalse(Files.exists(deleted));
+            assertEquals(102, store.allocateFileId());
+            assertEquals(Optional.of(value("1")), store.get(key("k")));
+            store.put(key("k"), value("2"));
+        }
+        try (LsmStore store = LsmStore.open(directory)) {
+            assertFalse(Files.exists(retained));
+            assertEquals(Optional.of(value("2")), store.get(key("k")));
+        }
+    }
+
+    @Test
+    void cleanupRunsAfterWalRecoveryAndBeforeWorkerStart() throws IOException {
+        try (LsmStore ignored = LsmStore.open(directory)) { }
+        Path orphan = directory.resolve("100.sst");
+        Files.write(orphan, new byte[]{7});
+        LsmStore.FileOps files = new LsmStore.FileOps() {
+            private boolean recovered;
+            private boolean deleted;
+
+            @Override
+            WalWriter openWal(Path path, Consumer<WalRecord> replay) throws IOException {
+                WalWriter writer = super.openWal(path, replay);
+                recovered = true;
+                return writer;
+            }
+
+            @Override
+            void deleteObsolete(Path path) throws IOException {
+                assertTrue(recovered);
+                super.deleteObsolete(path);
+                deleted = true;
+            }
+
+            @Override
+            Thread newWorker(Runnable task) {
+                return new Thread(task) {
+                    @Override
+                    public synchronized void start() {
+                        assertTrue(deleted);
+                        super.start();
+                    }
+                };
+            }
+        };
+        try (LsmStore store = LsmStore.open(directory, files)) {
+            assertFalse(Files.exists(orphan));
+            assertEquals(Optional.empty(), store.get(key("k")));
         }
     }
 

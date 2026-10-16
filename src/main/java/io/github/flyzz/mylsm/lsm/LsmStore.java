@@ -16,10 +16,12 @@ import io.github.flyzz.mylsm.wal.WalWriter;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.nio.file.DirectoryIteratorException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -149,6 +151,7 @@ public final class LsmStore implements AutoCloseable {
             LsmStore store = new LsmStore(directory, manifest, writer, active, frozen, tables,
                     owned, files, maxId, memTableTargetBytes);
             store.worker = Objects.requireNonNull(files.newWorker(store::runWorker), "worker");
+            cleanupOrphans(directory, manifest.current(), files);
             store.worker.start();
             return store;
         } catch (IOException | RuntimeException | Error failure) {
@@ -533,6 +536,34 @@ public final class LsmStore implements AutoCloseable {
             }
         }
         return max;
+    }
+
+    /** 完成恢复后、工作线程启动前清理；调用方独占目录，清理失败只留下孤儿。 */
+    private static void cleanupOrphans(Path directory, ManifestState snapshot, FileOps files) {
+        var live = new HashSet<String>();
+        live.add(snapshot.activeWalId() + ".wal");
+        if (snapshot.frozenWalId() != 0) {
+            live.add(snapshot.frozenWalId() + ".wal");
+        }
+        for (long id : snapshot.sstIds()) {
+            live.add(id + ".sst");
+        }
+        try (var children = Files.newDirectoryStream(directory)) {
+            for (Path path : children) {
+                String name = path.getFileName().toString();
+                if (!live.contains(name) && INTERNAL_FILE.matcher(name).matches()) {
+                    try {
+                        if (Files.readAttributes(path, BasicFileAttributes.class, NOFOLLOW_LINKS).isRegularFile()) {
+                            files.deleteObsolete(path);
+                        }
+                    } catch (IOException | RuntimeException ignored) {
+                        // 单个文件失败不妨碍其余清理，也不撤销已恢复的有效文件集。
+                    }
+                }
+            }
+        } catch (IOException | DirectoryIteratorException | SecurityException ignored) {
+            // 枚举或关闭目录失败时，已恢复的数据库仍可使用。
+        }
     }
 
     static Path walPath(Path directory, long id) {

@@ -83,3 +83,15 @@
 #### Scenario: Unknown file preservation
 - **WHEN** 有效数据库目录内存在不属于保留命名空间的用户文件
 - **THEN** 打开和内部孤儿清理不修改或删除该文件
+
+#### Scenario: Cleanup after successful recovery
+- **WHEN** 全部有效引用按各自打开/重放契约恢复成功，目录中仍有无引用的内部普通文件
+- **THEN** 工作线程启动前尝试删除这些文件，按完整文件名判断引用，保留有效文件、未知名称、目录和符号链接；本次运行仍保留清理前扫描到的最大编号
+
+#### Scenario: Recovery failure prevents cleanup
+- **WHEN** 初始化不完整、有效引用缺失或其打开/重放失败
+- **THEN** 不进行内部孤儿清理，保留未引用文件
+
+#### Scenario: Best effort orphan cleanup
+- **WHEN** 孤儿删除或清理目录枚举失败
+- **THEN** 不改变有效文件集且不阻止数据库打开，单个删除失败不阻止尝试清理其他文件，下次打开可重新清理

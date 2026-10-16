@@ -4,7 +4,7 @@
 
 用户已确定采用后台刷盘：一个活跃表、最多一个冻结表、一个刷盘线程，冻结槽位忙且活跃表达到阈值时写入等待。本设计将其落到独立目录级入口，不改变旧组件的独立使用契约。除用户已选的并发模型外，下列格式、默认值和接口是本提案给出的具体方案，随对应实现小步讲解和验证。
 
-当前已完成 Manifest、LsmStore 目录恢复与三态读写、WAL 轮换、单工作线程刷盘发布、背压、显式 flush 及关闭协调。学习笔记见 docs/manifest-codec.md、docs/manifest-file.md、docs/lsm-store.md 和 docs/lsm-background-flush.md。启动时孤儿清理已完成，组合进程退出验收与阶段复盘仍待完成。
+当前已完成 Manifest、LsmStore 目录恢复与三态读写、WAL 轮换、单工作线程刷盘发布、背压、显式 flush 及关闭协调。学习笔记见 docs/manifest-codec.md、docs/manifest-file.md、docs/lsm-store.md 和 docs/lsm-background-flush.md。启动时孤儿清理与独立进程退出验收已完成，退出边界及持久性限制见 docs/lsm-process-recovery.md；阶段复盘与规范同步归档仍待完成。
 
 ## Goals / Non-Goals
 
@@ -140,6 +140,8 @@ close 进入 CLOSING，拒绝新调用，允许已启动 worker 完成发布，�
 先讲解并实现 Manifest 状态与编解码（纯内存），再实现提交/恢复 I/O，再实现目录恢复与只含前台的基本读写，然后接入单冻结槽位轮换与后台发布，最后验证背压、生命周期及进程退出。每个小步单独解释和提交，不一次实现全部任务。
 
 测试使用 @TempDir、可控 I/O 代理和 latch，明确暂停在 WAL 切换、块输出、Manifest 发布等位置，不以 sleep 猜测调度。独立进程测试覆盖未正常关闭；不将它称为断电实验。
+
+已新增 LsmStoreProcessTest 的 6 个独立 JVM 用例：轮换提交前/后、真实 Writer 输出部分数据块后、发布提交前/后、两代 flush 完成后调用 Runtime.halt，跳过关闭。后台退出场景先用 latch 确保新 active 的覆盖/删除成功，再允许构建推进。父进程在打开前核对 Manifest 和原始文件状态，打开后暂缓恢复刷盘，检查最新优先、Tombstone、空值和二进制数据，再放行并 flush、续写、再次重开。触发轮换但尚未返回的 put 已同步 WAL，允许在重启后出现；测试不据此承诺失败回滚。全项目共 527 个测试，尚需完成用户复盘后同步正式规范及归档。
 
 ## Risks / Trade-offs
 

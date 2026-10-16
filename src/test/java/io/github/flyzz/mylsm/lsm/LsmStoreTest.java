@@ -24,6 +24,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -93,7 +95,8 @@ class LsmStoreTest {
         seedTwoTablesAndFrozen();
         byte[] frozen = Files.readAllBytes(directory.resolve("4.wal"));
         byte[] manifest = Files.readAllBytes(directory.resolve("MANIFEST"));
-        try (LsmStore store = LsmStore.open(directory)) {
+        PausedFiles paused = new PausedFiles();
+        try (LsmStore store = LsmStore.open(directory, paused); PausedFiles release = paused) {
             assertEquals(21, store.activeBytes());
             assertEquals(32, store.frozenBytes());
             assertEquals(Optional.of(value("1")), store.get(key("a")));
@@ -106,14 +109,15 @@ class LsmStoreTest {
             store.put(key("d"), value("5"));
             store.put(key("c"), value("5"));
             store.delete(key("b"));
+            assertArrayEquals(frozen, Files.readAllBytes(directory.resolve("4.wal")));
+            assertArrayEquals(manifest, Files.readAllBytes(directory.resolve("MANIFEST")));
         }
         try (LsmStore store = LsmStore.open(directory)) {
             assertEquals(Optional.of(value("5")), store.get(key("d")));
             assertEquals(Optional.of(value("5")), store.get(key("c")));
             assertEquals(Optional.of(Tombstone.INSTANCE), store.get(key("b")));
         }
-        assertArrayEquals(frozen, Files.readAllBytes(directory.resolve("4.wal")));
-        assertArrayEquals(manifest, Files.readAllBytes(directory.resolve("MANIFEST")));
+        assertFalse(Files.exists(directory.resolve("4.wal"))); // close 等待冻结代发布后回收旧 WAL。
         // 历史中的 1.wal、2.wal 已失效，不需要存在。
         assertFalse(Files.exists(directory.resolve("1.wal")));
         assertFalse(Files.exists(directory.resolve("2.wal")));
@@ -185,12 +189,14 @@ class LsmStoreTest {
         byte[] active = Files.readAllBytes(path);
         byte[] frozen = Files.readAllBytes(directory.resolve("4.wal"));
         Files.write(path, Arrays.copyOf(active, active.length + 1));
-        try (LsmStore store = LsmStore.open(directory)) {
+        PausedFiles paused = new PausedFiles();
+        try (LsmStore store = LsmStore.open(directory, paused); PausedFiles release = paused) {
             assertArrayEquals(active, Files.readAllBytes(path));
             assertEquals(Optional.of(value("4")), store.get(key("e")));
             store.put(key("g"), value("5"));
+            assertArrayEquals(frozen, Files.readAllBytes(directory.resolve("4.wal")));
         }
-        assertArrayEquals(frozen, Files.readAllBytes(directory.resolve("4.wal")));
+        assertFalse(Files.exists(directory.resolve("4.wal")));
         try (LsmStore store = LsmStore.open(directory)) {
             assertEquals(Optional.of(value("5")), store.get(key("g")));
         }
@@ -265,10 +271,12 @@ class LsmStoreTest {
         Files.write(directory.resolve("1000.sst"), new byte[]{8});
         Files.write(directory.resolve("notes.txt"), new byte[]{9});
         Files.write(directory.resolve("0007.wal"), new byte[]{10}); // 非规范内部名称。
-        try (LsmStore store = LsmStore.open(directory)) {
+        PausedFiles paused = new PausedFiles();
+        try (LsmStore store = LsmStore.open(directory, paused); PausedFiles release = paused) {
+            paused.awaitStarted(); // 后台已经为输出预留 1001。
             assertEquals(Optional.of(value("1")), store.get(key("a")));
-            assertEquals(1001, store.allocateFileId());
             assertEquals(1002, store.allocateFileId());
+            assertEquals(1003, store.allocateFileId());
         }
         assertArrayEquals(new byte[]{7}, Files.readAllBytes(directory.resolve("999.wal")));
         assertArrayEquals(new byte[]{8}, Files.readAllBytes(directory.resolve("1000.sst")));
@@ -471,6 +479,41 @@ class LsmStoreTest {
         WalWriter openWal(Path path, Consumer<WalRecord> replay) throws IOException {
             if (failOpenWal) { throw failure; }
             return super.openWal(path, replay);
+        }
+    }
+
+    private static final class PausedFiles extends LsmStore.FileOps implements AutoCloseable {
+        private final CountDownLatch started = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+
+        @Override
+        void writeTable(Path path, Iterable<SsTableRecord> records) throws IOException {
+            started.countDown();
+            try {
+                if (!release.await(10, TimeUnit.SECONDS)) {
+                    throw new IOException("test flush release timed out");
+                }
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new IOException(failure);
+            }
+            super.writeTable(path, records);
+        }
+
+        void awaitStarted() throws IOException {
+            try {
+                if (!started.await(10, TimeUnit.SECONDS)) {
+                    throw new IOException("test flush start timed out");
+                }
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new IOException(failure);
+            }
+        }
+
+        @Override
+        public void close() {
+            release.countDown();
         }
     }
 }

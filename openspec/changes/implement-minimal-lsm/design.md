@@ -4,7 +4,7 @@
 
 用户已确定采用后台刷盘：一个活跃表、最多一个冻结表、一个刷盘线程，冻结槽位忙且活跃表达到阈值时写入等待。本设计将其落到独立目录级入口，不改变旧组件的独立使用契约。除用户已选的并发模型外，下列格式、默认值和接口是本提案给出的具体方案，随对应实现小步讲解和验证。
 
-当前已完成 Manifest 编解码及文件追加恢复，以及 LsmStore 的目录初始化、引用验证、两代 WAL 恢复、最新优先三态读写，学习笔记见 docs/manifest-codec.md、docs/manifest-file.md 与 docs/lsm-store.md。日志轮换、线程协调、背压和 flush 尚未实现，以下相应流程仍是后续设计。
+当前已完成 Manifest、LsmStore 目录恢复与三态读写、WAL 轮换、单工作线程刷盘发布、背压及关闭协调。学习笔记见 docs/manifest-codec.md、docs/manifest-file.md、docs/lsm-store.md 和 docs/lsm-background-flush.md。显式 flush、启动时孤儿清理和阶段验收仍待完成。
 
 ## Goals / Non-Goals
 
@@ -30,11 +30,13 @@
 - `flush()`：等待调用前未发布的数据全部成为正式 SSTable，空库不创建空表文件。
 - `close()`：停止接收请求，等待已启动后台任务结束并关闭资源；不强制把剩余活跃表写成 SSTable，其 WAL 负责恢复。
 
-基础步骤当前仅实现 open(Path)、put/delete/get/close，保持前台单线程；尚不引入阈值配置、flush、锁和 worker。已恢复 frozen 表也只读保留，下一步再启动后台任务；不把这一中间状态宣称为完整阶段能力。
+当前实现 open(Path)、带正逻辑阈值的 open 重载、put/delete/get/close，默认目标 4 MiB。前台串行，一个内部 worker 在 open 成功恢复后启动，恢复的 frozen 会自动刷盘；显式 flush 仍待下一小步。
 
 前台 API 仍要求调用方串行使用，只新增内部后台并行。状态、MemTable 的访问、Manifest 提交、文件编号分配及查询均由同一锁串行化。后台仅在锁外构建冻结表对应的 SSTable，在锁内发布结果和唤醒等待者。读取器的 get/close 在锁内执行，避免修改现有 SsTableReader 的线程安全契约；不向调用方泄露内部表或 Reader。
 
 单工作线程显式拥有任务生命周期，不使用无界队列。等待使用条件变量并在循环中重查状态；释放锁等待，避免工作线程无法发布。不得在持锁时 join 工作线程。关闭须等工作线程停止访问文件后才释放资源；即使失败也尝试关闭所有资源，清理错误 suppressed。
+
+已具体使用 ReentrantLock/Condition，worker 在无 frozen 时等待，轮换只设置单槽位并 signal；后台取冻结表快照和分配输出编号时持锁，文件构建及独立输出 Reader 打开时不持锁。FileOps 追加 writeTable、commit、closeWal、walSize、deleteObsolete、newWorker，以及仅供测试观察条件等待的 beforeWait 阻塞点，不允许该阻塞点等待发布。
 
 ### 2. 写入、阈值与背压
 
@@ -107,6 +109,8 @@ Manifest 描述进程崩溃下的恢复来源；新目录项和文件同步的�
 flush 在串行前台调用中，先等待已有冻结任务发布；然后若活跃表非空，轮换并等待该任务发布；返回时调用前的数据均已进入清单。后台错误使等待者得到 IOException，不能只检查“任务结束”就当成功。等待中断报告 InterruptedIOException 并恢复中断标志；没有文件错误时不单因调用方中断而丢弃冻结数据或将服务判坏。
 
 close 进入 CLOSING，拒绝新调用，允许已启动 worker 完成发布，锁外等待终止后再关闭活跃 WAL、SSTable Reader、Manifest。关闭等待不因中断提前释放后台仍使用的资源，完成后恢复中断标志。正常关闭无需刷剩余 active，重启由 WAL 恢复。FAILED 也可关闭，重复关闭安全，关闭报错后不再可用。
+
+关闭协调是接入线程后安全释放文件的必要前置，已在本步完成任务 6.3。后台错误保存并唤醒等待者，已有槽位等待抛 IOException 且携带原因，后续新调用按 FAILED 拒绝；close 也报告后台失败并聚合清理错误。前台读取/追加已报出的错误不会无条件作为新的后台错误再次报告。若前台先失败，worker 完成输出后不再发布，关闭尚未移交的 Reader 并保留 WAL；发布成功后的旧 WAL 删除 IOException/运行时异常仅留下孤儿，不撤销状态。
 
 ### 8. 恢复及崩溃窗口
 

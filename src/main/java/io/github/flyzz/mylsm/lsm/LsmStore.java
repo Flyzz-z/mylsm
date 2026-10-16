@@ -1,17 +1,21 @@
 package io.github.flyzz.mylsm.lsm;
 
 import io.github.flyzz.mylsm.memtable.MemTable;
+import io.github.flyzz.mylsm.memtable.MemTableRecord;
 import io.github.flyzz.mylsm.memtable.TreeMapMemTable;
 import io.github.flyzz.mylsm.model.ByteKey;
 import io.github.flyzz.mylsm.model.Entry;
 import io.github.flyzz.mylsm.model.Tombstone;
 import io.github.flyzz.mylsm.model.Value;
 import io.github.flyzz.mylsm.sstable.SsTableReader;
+import io.github.flyzz.mylsm.sstable.SsTableRecord;
+import io.github.flyzz.mylsm.sstable.SsTableWriter;
 import io.github.flyzz.mylsm.wal.WalCodec;
 import io.github.flyzz.mylsm.wal.WalRecord;
 import io.github.flyzz.mylsm.wal.WalWriter;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -19,36 +23,51 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 
 /**
- * 目录级存储的基础读写与恢复入口，单线程、单实例独占目录。
- * 当前实现尚不轮换或后台刷盘；恢复的冻结表只读保留，活跃写入继续由 WAL 持久化。
+ * 目录级存储，前台串行调用，内部一个线程后台刷盘，调用方必须独占目录。
+ * 最多一个活跃表和一个冻结表；冻结槽位忙且活跃表已满时后续写入等待。
  */
 public final class LsmStore implements AutoCloseable {
     private static final Pattern INTERNAL_FILE = Pattern.compile("([1-9][0-9]*)\\.(wal|sst)");
     private static final FileOps FILES = new FileOps();
-    private enum State { OPEN, FAILED, CLOSED }
+    private static final long DEFAULT_MEMTABLE_TARGET_BYTES = 4 * 1024 * 1024;
+    private enum State { OPEN, FAILED, CLOSING, CLOSED }
 
-    private final WalWriter writer;
-    private final MemoryTable active;
-    private final MemoryTable frozen;
-    private final List<SsTableReader> tables; // 从旧到新。
-    private final List<AutoCloseable> owned;
+    private final Path directory;
+    private final ManifestFile manifest;
+    private final long targetBytes;
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition changed = lock.newCondition();
+    private WalWriter writer;
+    private MemoryTable active;
+    private Frozen frozen;
+    private List<SsTableReader> tables; // 从旧到新。
+    private List<AutoCloseable> owned;
     private final FileOps files;
+    private Thread worker;
     private long maxFileId;
     private State state = State.OPEN;
+    private Throwable failure;
+    private Throwable backgroundFailure;
 
-    private LsmStore(WalWriter writer, MemoryTable active, MemoryTable frozen,
-                     List<SsTableReader> tables, List<AutoCloseable> owned, FileOps files, long maxFileId) {
+    private LsmStore(Path directory, ManifestFile manifest, WalWriter writer, MemoryTable active,
+                     MemoryTable frozen, List<SsTableReader> tables, List<AutoCloseable> owned,
+                     FileOps files, long maxFileId, long targetBytes) {
+        this.directory = directory;
+        this.manifest = manifest;
+        this.targetBytes = targetBytes;
         this.writer = writer;
         this.active = active;
-        this.frozen = frozen;
-        this.tables = List.copyOf(tables);
-        this.owned = List.copyOf(owned);
+        this.frozen = frozen == null ? null : new Frozen(frozen, manifest.current().frozenWalId());
+        this.tables = new ArrayList<>(tables);
+        this.owned = new ArrayList<>(owned);
         this.files = files;
         this.maxFileId = maxFileId;
     }
@@ -59,12 +78,24 @@ public final class LsmStore implements AutoCloseable {
      * 不提供文件锁；调用方不得同时通过其他实例或进程访问目录。
      */
     public static LsmStore open(Path directory) throws IOException {
-        return open(directory, FILES);
+        return open(directory, DEFAULT_MEMTABLE_TARGET_BYTES, FILES);
+    }
+
+    /** 目标是每表最新记录编码字节量，允许一条合法大记录越过目标，不等于堆内存上限。 */
+    public static LsmStore open(Path directory, long memTableTargetBytes) throws IOException {
+        return open(directory, memTableTargetBytes, FILES);
     }
 
     static LsmStore open(Path directory, FileOps files) throws IOException {
+        return open(directory, DEFAULT_MEMTABLE_TARGET_BYTES, files);
+    }
+
+    static LsmStore open(Path directory, long memTableTargetBytes, FileOps files) throws IOException {
         Objects.requireNonNull(directory, "directory");
         Objects.requireNonNull(files, "files");
+        if (memTableTargetBytes <= 0) {
+            throw new IllegalArgumentException("MemTable target must be positive");
+        }
         if (!Files.readAttributes(directory, BasicFileAttributes.class).isDirectory()) {
             throw new IOException("LSM path is not a directory: " + directory);
         }
@@ -115,36 +146,59 @@ public final class LsmStore implements AutoCloseable {
                 writer = files.openWal(walPath(directory, snapshot.activeWalId()), active::apply);
                 owned.add(writer);
             }
-            return new LsmStore(writer, active, frozen, tables, owned, files, maxId);
+            LsmStore store = new LsmStore(directory, manifest, writer, active, frozen, tables,
+                    owned, files, maxId, memTableTargetBytes);
+            store.worker = Objects.requireNonNull(files.newWorker(store::runWorker), "worker");
+            store.worker.start();
+            return store;
         } catch (IOException | RuntimeException | Error failure) {
             closeResources(owned, failure);
             throw failure;
         }
     }
 
-    /** 完整追加并同步当前 WAL 后更新活跃表；尚不自动刷盘。 */
+    /** 完整追加并同步 WAL 后更新活跃表；必要时轮换或在追加前等待冻结槽位。 */
     public void put(ByteKey key, Value value) throws IOException {
-        requireOpen();
-        appendAndApply(new WalRecord(key, value));
+        lock.lock();
+        try {
+            requireOpen();
+            appendAndApply(new WalRecord(key, value));
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** 保存删除标记，包含当前不存在的键。 */
     public void delete(ByteKey key) throws IOException {
-        requireOpen();
-        appendAndApply(new WalRecord(key, Tombstone.INSTANCE));
+        lock.lock();
+        try {
+            requireOpen();
+            appendAndApply(new WalRecord(key, Tombstone.INSTANCE));
+        } finally {
+            lock.unlock();
+        }
     }
 
     /** 按 active、frozen、SSTable 从新到旧查询，遇到 Tombstone 也立即停止。 */
     public Optional<Entry> get(ByteKey key) throws IOException {
-        requireOpen();
-        Objects.requireNonNull(key, "key");
+        lock.lock();
+        try {
+            requireOpen();
+            Objects.requireNonNull(key, "key");
+            return getRecord(key);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private Optional<Entry> getRecord(ByteKey key) throws IOException {
         try {
             Optional<Entry> result = active.table.get(key);
             if (result.isPresent()) {
                 return result;
             }
             if (frozen != null) {
-                result = frozen.table.get(key);
+                result = frozen.memory().table.get(key);
                 if (result.isPresent()) {
                     return result;
                 }
@@ -157,25 +211,57 @@ public final class LsmStore implements AutoCloseable {
             }
             return Optional.empty();
         } catch (IOException | RuntimeException | Error failure) {
-            state = State.FAILED;
+            fail(failure, false);
             throw failure;
         }
     }
 
     private void appendAndApply(WalRecord record) throws IOException {
-        long newBytes = active.bytesAfter(record); // 参数/容量验证在 WAL 追加前完成。
+        active.bytesAfter(record); // 在可能等待或轮换之前拒绝非法参数。
+        while (active.bytes >= targetBytes) {
+            if (frozen != null) {
+                files.beforeWait();
+                try {
+                    changed.await();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    InterruptedIOException error = new InterruptedIOException("Interrupted waiting for flush slot");
+                    error.initCause(interrupted);
+                    throw error;
+                }
+                if (state == State.FAILED) {
+                    throw new IOException("LSM failed while waiting for flush slot", failure);
+                }
+                requireOpen();
+            } else {
+                rotate();
+            }
+        }
+        long newBytes = active.bytesAfter(record);
         try {
             files.append(writer, record);
             active.apply(record, newBytes);
         } catch (IOException | RuntimeException | Error failure) {
-            state = State.FAILED;
+            fail(failure, false);
             throw failure;
+        }
+        if (active.bytes >= targetBytes && frozen == null) {
+            rotate();
         }
     }
 
-    /** 仅为后续轮换预留编号，不创建文件；新文件仍须使用 CREATE_NEW。 */
+    /** 包内编号预留，不创建文件；轮换/输出创建仍须使用 CREATE_NEW。 */
     long allocateFileId() throws IOException {
-        requireOpen();
+        lock.lock();
+        try {
+            requireOpen();
+            return allocateFileIdLocked();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private long allocateFileIdLocked() throws IOException {
         if (maxFileId == Long.MAX_VALUE) {
             throw new IOException("LSM file ID space exhausted");
         }
@@ -183,23 +269,62 @@ public final class LsmStore implements AutoCloseable {
     }
 
     long activeBytes() {
-        requireOpen();
-        return active.bytes;
+        lock.lock();
+        try {
+            requireOpen();
+            return active.bytes;
+        } finally {
+            lock.unlock();
+        }
     }
 
     long frozenBytes() {
-        requireOpen();
-        return frozen == null ? 0 : frozen.bytes;
+        lock.lock();
+        try {
+            requireOpen();
+            return frozen == null ? 0 : frozen.memory().bytes;
+        } finally {
+            lock.unlock();
+        }
     }
 
-    /** 本步无后台任务，关闭所有持有资源；不将活跃表强制写成 SSTable。 */
+    /** 等待已启动后台任务结束后释放资源；不强刷剩余活跃表。等待中断延后恢复标志。 */
     @Override
     public void close() throws IOException {
-        if (state == State.CLOSED) {
-            return;
+        lock.lock();
+        try {
+            if (state == State.CLOSED) {
+                return;
+            }
+            if (state == State.OPEN) {
+                state = State.CLOSING;
+            }
+            changed.signalAll();
+        } finally {
+            lock.unlock();
         }
-        state = State.CLOSED;
-        Throwable failure = closeResources(owned, null);
+        boolean interrupted = false;
+        while (worker.isAlive()) {
+            try {
+                worker.join();
+            } catch (InterruptedException ignored) {
+                interrupted = true;
+            }
+        }
+        Throwable failure;
+        lock.lock();
+        try {
+            state = State.CLOSED;
+            failure = backgroundFailure == null ? null
+                    : new IOException("Background SSTable flush failed", backgroundFailure);
+            failure = closeResources(owned, failure);
+            owned = List.of();
+        } finally {
+            lock.unlock();
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
         if (failure instanceof IOException ioFailure) {
             throw ioFailure;
         }
@@ -216,8 +341,148 @@ public final class LsmStore implements AutoCloseable {
 
     private void requireOpen() {
         if (state != State.OPEN) {
-            throw new IllegalStateException("LSM store is " + state);
+            throw new IllegalStateException("LSM store is " + state, failure);
         }
+    }
+
+    /** 持锁执行；新 WAL 被提交为 active 之前绝不接纳用户写入。 */
+    private void rotate() throws IOException {
+        WalWriter nextWriter = null;
+        boolean registered = false;
+        try {
+            ManifestState previous = manifest.current();
+            long nextId = allocateFileIdLocked();
+            MemoryTable nextActive = new MemoryTable();
+            Frozen nextFrozen = new Frozen(active, previous.activeWalId());
+            nextWriter = files.createWal(walPath(directory, nextId));
+            owned.add(nextWriter);
+            registered = true;
+            files.closeWal(writer);
+            owned.remove(writer);
+            long sealedLength = files.walSize(walPath(directory, previous.activeWalId()));
+            ManifestState next = new ManifestState(Math.incrementExact(previous.revision()), nextId,
+                    previous.activeWalId(), sealedLength, previous.sstIds());
+            files.commit(manifest, next);
+            writer = nextWriter;
+            active = nextActive;
+            frozen = nextFrozen;
+            changed.signalAll();
+        } catch (IOException | RuntimeException | Error failure) {
+            if (nextWriter != null && !registered) {
+                closeResources(List.of(nextWriter), failure);
+            }
+            fail(failure, false);
+            throw failure;
+        }
+    }
+
+    /** 线程拥有唯一执行循环，不使用任务队列；恢复的 frozen 也由同一线程处理。 */
+    private void runWorker() {
+        try {
+            while (true) {
+                Frozen job;
+                long outputId;
+                List<MemTableRecord> snapshot;
+                lock.lock();
+                try {
+                    while (frozen == null && state == State.OPEN) {
+                        changed.awaitUninterruptibly();
+                    }
+                    if (frozen == null || state == State.FAILED || state == State.CLOSED) {
+                        return;
+                    }
+                    job = frozen;
+                    outputId = allocateFileIdLocked();
+                    snapshot = job.memory().table.snapshot();
+                } finally {
+                    lock.unlock();
+                }
+                writeAndPublish(job, outputId, snapshot);
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            lock.lock();
+            try {
+                fail(failure, true);
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+
+    private void writeAndPublish(Frozen job, long outputId, List<MemTableRecord> snapshot) throws IOException {
+        Path output = sstPath(directory, outputId);
+        // 固定快照的惰性适配，不另收集一份全表列表。
+        Iterable<SsTableRecord> records = () -> snapshot.stream()
+                .map(record -> new SsTableRecord(record.key(), record.entry())).iterator();
+        SsTableReader reader = null;
+        Throwable primary = null;
+        try {
+            files.writeTable(output, records);
+            reader = files.openTable(output);
+            lock.lock();
+            try {
+                if (state == State.FAILED || state == State.CLOSED) {
+                    return; // 其他路径已失败：保留 WAL，不再提交新状态。
+                }
+                ManifestState previous = manifest.current();
+                List<Long> ids = new ArrayList<>(previous.sstIds());
+                if (ids.size() == ManifestCodec.MAX_SSTABLE_COUNT) {
+                    throw new IOException("Manifest state exceeds payload limit");
+                }
+                ids.add(outputId);
+                ManifestState next = new ManifestState(Math.incrementExact(previous.revision()),
+                        previous.activeWalId(), 0, 0, ids);
+                List<SsTableReader> nextTables = new ArrayList<>(tables);
+                nextTables.add(reader);
+                List<AutoCloseable> nextOwned = new ArrayList<>(owned);
+                nextOwned.add(reader);
+                files.commit(manifest, next);
+                tables = nextTables;
+                owned = nextOwned;
+                reader = null; // 所有权已移交；提交后的安装只做引用赋值。
+                frozen = null;
+                changed.signalAll();
+            } finally {
+                lock.unlock();
+            }
+            try {
+                files.deleteObsolete(walPath(directory, job.walId()));
+            } catch (IOException | RuntimeException ignored) {
+                // 最新成功提交不再引用它，留下孤儿不改变数据库语义。
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            primary = failure;
+            throw failure;
+        } finally {
+            if (reader != null) {
+                try {
+                    reader.close();
+                } catch (IOException | RuntimeException | Error cleanupFailure) {
+                    if (primary != null) {
+                        if (primary != cleanupFailure) {
+                            primary.addSuppressed(cleanupFailure);
+                        }
+                    } else {
+                        throw cleanupFailure;
+                    }
+                }
+            }
+        }
+    }
+
+    /** 所有调用者都持有 lock；先保存错误，再唤醒前台及工作线程。 */
+    private void fail(Throwable cause, boolean background) {
+        if (failure == null) {
+            failure = cause;
+        }
+        if (background && backgroundFailure == null) {
+            backgroundFailure = cause;
+        }
+        state = State.FAILED;
+        changed.signalAll();
+    }
+
+    private record Frozen(MemoryTable memory, long walId) {
     }
 
     private static void requireRegularFile(Path path) throws IOException {
@@ -268,6 +533,34 @@ public final class LsmStore implements AutoCloseable {
 
     /** 组合层的最小故障注入边界；方法返回前失败须自行清理尚未移交的资源。 */
     static class FileOps {
+        Thread newWorker(Runnable task) {
+            return new Thread(task, "mylsm-flush");
+        }
+
+        /** 包内测试阻塞点：调用时持状态锁，测试不得在此等待发布。 */
+        void beforeWait() {
+        }
+
+        void writeTable(Path path, Iterable<SsTableRecord> records) throws IOException {
+            SsTableWriter.write(path, records);
+        }
+
+        void commit(ManifestFile manifest, ManifestState next) throws IOException {
+            manifest.append(next);
+        }
+
+        void closeWal(WalWriter writer) throws IOException {
+            writer.close();
+        }
+
+        long walSize(Path path) throws IOException {
+            return Files.size(path);
+        }
+
+        void deleteObsolete(Path path) throws IOException {
+            Files.deleteIfExists(path);
+        }
+
         WalWriter createWal(Path path) throws IOException {
             Files.createFile(path); // CREATE_NEW；初始化失败保留文件，禁止覆盖。
             return WalWriter.openEmpty(path);

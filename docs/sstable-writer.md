@@ -1,6 +1,6 @@
 # SSTable 第三步：构建真实文件
 
-本步新增公开入口 `SsTableWriter.write(Path, Iterable<SsTableRecord>)`，将已排序输入一次性写入新文件。父目录必须存在，输入可以为空，但必须按 ByteKey 的无符号字节字典序严格递增。点查 Reader 与 scan 尚未实现。
+本步新增公开入口 `SsTableWriter.write(Path, Iterable<SsTableRecord>)`，将已排序输入一次性写入新文件。父目录必须存在，输入可以为空，但必须按 ByteKey 的无符号字节字典序严格递增。后续点查见 [Reader 笔记](sstable-reader.md)，scan 尚未实现。
 
 ## 写入的数据流
 
@@ -79,4 +79,4 @@ Writer 包内有两个边界：FileOps 提供 createNew/delete，WriteIo 提供�
 
 测试全部使用 JUnit @TempDir。故障代理仍写真实文件，只在指定边界制造短写、无进展或异常。覆盖各文件区域写入失败、同步时文件已完整、关闭后再清理、主错误与 suppressed 顺序、已有空文件保护、迭代失败、跨块顺序、分块边界和索引超限。
 
-本步 `./mvnw test` 通过：新增 31 个用例，全项目 312 个，无失败。接下来才实现 Reader，打开元信息、定位候选块并提供三态点查。
+本步 `./mvnw test` 通过：新增 31 个用例，当时全项目 312 个，无失败。后续 Reader 已实现打开元信息、定位候选块并提供三态点查，见 [第四步](sstable-reader.md)。

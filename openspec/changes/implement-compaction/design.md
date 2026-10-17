@@ -51,6 +51,8 @@ SsTableReader.openCursor() 返回单线程 Cursor；next() throws IOException �
 
 每输入提供一个头记录，最小堆选择下一键，排空相同键输入头，按 Manifest 位置选胜者并推进这些输入，然后输出。约 O(N log K) 时间、K 个输入块加堆与输出块的记录缓冲；Reader 索引另计。相比全表 TreeMap，不复制全库记录。
 
+本步实现为 SsTableMerger.open(oldestToNewest)，提供 next/record/close。它借用 Reader 并管理自有游标，open 不预读数据块；第一次 next 初始化全部头。获取失败、推进失败或关闭时释放自有游标，不关闭输入 Reader。堆内头键不原地改变，必须先出堆再推进。同键组全部成功处理后才暴露胜者，失败后拒绝继续返回当前记录；具体流程及验证见 docs/sstable-merge.md。
+
 Writer 的 Iterable 无 checked I/O：局部适配为 UncheckedIOException，在构建边界还原 IOException，保留 cause 和 suppressed 清理异常，不扩展通用文件框架。
 
 ### 5. 锁边界与 Manifest 转换
@@ -91,4 +93,4 @@ Writer 的 Iterable 无 checked I/O：局部适配为 UncheckedIOException，在
 
 ## Migration Plan
 
-按已确认方案分步实现；本轮先游标与针对性验证，留出讨论空间再推进归并。正式 specs 不提前修改，验收和学习复盘完成后再同步并归档，不推送。
+按已确认方案分步实现；已完成游标，当前推进多路归并与针对性验证，留出讨论空间再推进 Manifest 替换。正式 specs 不提前修改，验收和学习复盘完成后再同步并归档，不推送。

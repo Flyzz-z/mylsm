@@ -6,7 +6,7 @@
 
 阶段 4 已完成复盘与归档：支持 Manifest、LsmStore 目录恢复与三态读写、单冻结表后台刷盘、阈值背压、显式 flush、安全关闭和启动时的内部孤儿清理。见[编解码笔记](docs/manifest-codec.md)、[文件笔记](docs/manifest-file.md)、[目录恢复笔记](docs/lsm-store.md)、[后台刷盘笔记](docs/lsm-background-flush.md)和[阶段复盘](docs/lsm-review.md)。默认每表逻辑目标 4 MiB，可通过 open 重载配置；已通过[独立进程退出恢复验证](docs/lsm-process-recovery.md)，不承诺断电一致性。正式规范见 [lsm-store](openspec/specs/lsm-store/spec.md) 和 [lsm-manifest](openspec/specs/lsm-manifest/spec.md)，阶段记录见[归档设计](openspec/changes/archive/2026-10-16-implement-minimal-lsm/design.md)和[归档任务](openspec/changes/archive/2026-10-16-implement-minimal-lsm/tasks.md)。
 
-阶段 5 已开始：已确认复用单后台线程，支持自动阈值触发和同步手动请求的全量 compaction。当前只完成第一个小步——[SSTable 可暂停游标](docs/sstable-cursor.md)，支持逐块推进、按需校验及独占生命周期。多路归并、Manifest 替换和后台压缩尚未实现；进行中方案与任务见 [compaction 设计](openspec/changes/implement-compaction/design.md)和[任务](openspec/changes/implement-compaction/tasks.md)。
+阶段 5 已开始：已确认复用单后台线程，支持自动阈值触发和同步手动请求的全量 compaction。当前完成 [SSTable 可暂停游标](docs/sstable-cursor.md)和[多路有序归并](docs/sstable-merge.md)，流式输出每键最新 Value 或 Tombstone。Manifest 替换和后台压缩尚未实现；进行中方案与任务见 [compaction 设计](openspec/changes/implement-compaction/design.md)和[任务](openspec/changes/implement-compaction/tasks.md)。
 
 ## 环境与构建
 

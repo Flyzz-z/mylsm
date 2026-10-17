@@ -11,6 +11,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManifestStateTest {
     @Test
@@ -163,6 +164,148 @@ class ManifestStateTest {
         ManifestState frozen = new ManifestState(2, Long.MAX_VALUE, 1, 8, List.of());
         assertThrows(IllegalArgumentException.class,
                 () -> frozen.requireSuccessor(new ManifestState(3, Long.MAX_VALUE, 0, 0, List.of(2L))));
+    }
+
+    @Test
+    void compactionReplacesAllTablesWithoutChangingAnActiveLog() {
+        ManifestState before = new ManifestState(5, 4, 0, 0, List.of(3L, 5L));
+        ManifestState after = new ManifestState(6, 4, 0, 0, List.of(6L));
+        before.requireSuccessor(after);
+        assertEquals(List.of(3L, 5L), before.sstIds());
+        assertEquals(List.of(6L), after.sstIds());
+        assertEquals(6, after.maxFileId());
+        // 后续轮换与发布仍可正常发生，较新的 flush 输出追加到压缩输出之后。
+        ManifestState rotated = new ManifestState(7, 7, 4, 300, List.of(6L));
+        ManifestState published = new ManifestState(8, 7, 0, 0, List.of(6L, 8L));
+        after.requireSuccessor(rotated);
+        rotated.requireSuccessor(published);
+    }
+
+    @Test
+    void compactionCanPublishAReservedOutputBelowANewerWalAndThenFlushFrozen() {
+        List<ManifestState> history = List.of(initial(),
+                new ManifestState(2, 2, 1, 100, List.of()),
+                new ManifestState(3, 2, 0, 0, List.of(3L)),
+                new ManifestState(4, 4, 2, 200, List.of(3L)),
+                new ManifestState(5, 4, 0, 0, List.of(3L, 5L)),
+                // 编号 6 在压缩开始时预留；期间前台轮换到新 WAL 7。
+                new ManifestState(6, 7, 4, 300, List.of(3L, 5L)),
+                new ManifestState(7, 7, 4, 300, List.of(6L)),
+                new ManifestState(8, 7, 0, 0, List.of(6L, 8L)),
+                new ManifestState(9, 9, 7, 400, List.of(6L, 8L)),
+                new ManifestState(10, 9, 7, 400, List.of(10L)),
+                new ManifestState(11, 9, 0, 0, List.of(10L, 11L)),
+                new ManifestState(12, 9, 0, 0, List.of(12L)));
+        history.getFirst().requireInitial();
+        for (int i = 1; i < history.size(); i++) {
+            ManifestState before = history.get(i - 1);
+            ManifestState after = history.get(i);
+            before.requireSuccessor(after);
+            assertTrue(after.maxFileId() >= before.maxFileId());
+        }
+        assertEquals(7, history.get(6).maxFileId()); // 此次提交上界不变，无须人为再增加编号。
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void compactionRejectsPartialReplacementAndChangesToAnyWalField(boolean frozen) {
+        long frozenId = frozen ? 10 : 0;
+        long length = frozen ? 800 : 0;
+        ManifestState before = new ManifestState(7, 20, frozenId, length, List.of(3L, 5L));
+        List<ManifestState> invalid = new ArrayList<>(List.of(
+                new ManifestState(8, 20, frozenId, length, List.of()),
+                new ManifestState(8, 20, frozenId, length, List.of(3L)),
+                new ManifestState(8, 20, frozenId, length, List.of(4L)),
+                new ManifestState(8, 20, frozenId, length, List.of(5L)),
+                new ManifestState(8, 20, frozenId, length, List.of(3L, 6L)),
+                new ManifestState(8, 20, frozenId, length, List.of(6L, 3L)),
+                new ManifestState(8, 20, frozenId, length, List.of(6L, 7L)),
+                new ManifestState(8, 21, frozenId, length, List.of(6L))));
+        if (frozen) {
+            invalid.add(new ManifestState(8, 20, 0, 0, List.of(6L)));
+            invalid.add(new ManifestState(8, 20, 11, 800, List.of(6L)));
+            invalid.add(new ManifestState(8, 20, 10, 801, List.of(6L)));
+        } else {
+            invalid.add(new ManifestState(8, 20, 10, 800, List.of(6L)));
+        }
+        for (ManifestState next : invalid) {
+            assertThrows(IllegalArgumentException.class, () -> before.requireSuccessor(next));
+        }
+        for (long walId : new long[]{20, 10}) {
+            // 当前引用的查重先在状态构造器完成，压缩分支不能绕过它。
+            if (walId == 10 && !frozen) {
+                continue;
+            }
+            assertThrows(IllegalArgumentException.class,
+                    () -> before.requireSuccessor(new ManifestState(8, 20, frozenId, length, List.of(walId))));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1})
+    void compactionDoesNotAllowAnEmptyOrSingleInputRewrite(int count) {
+        List<Long> ids = count == 0 ? List.of() : List.of(3L);
+        ManifestState before = new ManifestState(5, 4, 0, 0, ids);
+        assertThrows(IllegalArgumentException.class,
+                () -> before.requireSuccessor(new ManifestState(6, 4, 0, 0, List.of(6L))));
+    }
+
+    @Test
+    void compactionUsesTheMaximumInputIdRatherThanTheLastListPosition() {
+        ManifestState before = new ManifestState(7, 20, 15, 800, List.of(9L, 4L));
+        assertThrows(IllegalArgumentException.class,
+                () -> before.requireSuccessor(new ManifestState(8, 20, 15, 800, List.of(8L))));
+        before.requireSuccessor(new ManifestState(8, 20, 15, 800, List.of(10L)));
+    }
+
+    @Test
+    void removedSstAndWalReferencesCannotBeReusedAfterRepeatedCompaction() {
+        List<ManifestState> history = List.of(initial(),
+                new ManifestState(2, 2, 1, 100, List.of()),
+                new ManifestState(3, 2, 0, 0, List.of(3L)),
+                new ManifestState(4, 4, 2, 200, List.of(3L)),
+                new ManifestState(5, 4, 0, 0, List.of(3L, 5L)),
+                new ManifestState(6, 4, 0, 0, List.of(6L)),
+                new ManifestState(7, 7, 4, 300, List.of(6L)),
+                new ManifestState(8, 7, 0, 0, List.of(6L, 8L)),
+                new ManifestState(9, 7, 0, 0, List.of(9L)),
+                new ManifestState(10, 10, 7, 400, List.of(9L)),
+                new ManifestState(11, 10, 0, 0, List.of(9L, 11L)));
+        for (int i = 1; i < history.size(); i++) {
+            history.get(i - 1).requireSuccessor(history.get(i));
+        }
+        ManifestState current = history.getLast();
+        for (long id : new long[]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> current.requireSuccessor(new ManifestState(12, 10, 0, 0, List.of(id))));
+        }
+        current.requireSuccessor(new ManifestState(12, 10, 0, 0, List.of(12L)));
+    }
+
+    @Test
+    void compactionKeepsRevisionAndFileIdOverflowChecks() {
+        ManifestState before = new ManifestState(Long.MAX_VALUE - 1, 4, 0, 0, List.of(3L, 5L));
+        before.requireSuccessor(new ManifestState(Long.MAX_VALUE, 4, 0, 0, List.of(6L)));
+        ManifestState last = new ManifestState(Long.MAX_VALUE, 4, 0, 0, List.of(3L, 5L));
+        assertThrows(IllegalArgumentException.class,
+                () -> last.requireSuccessor(new ManifestState(1, 4, 0, 0, List.of(6L))));
+        assertThrows(IllegalArgumentException.class,
+                () -> before.requireSuccessor(new ManifestState(Long.MAX_VALUE - 1, 4, 0, 0, List.of(6L))));
+        ManifestState ordinary = new ManifestState(5, 4, 0, 0, List.of(3L, 5L));
+        ordinary.requireSuccessor(new ManifestState(6, 4, 0, 0, List.of(Long.MAX_VALUE)));
+        ManifestState exhausted = new ManifestState(5, 4, 0, 0, List.of(3L, Long.MAX_VALUE));
+        assertThrows(IllegalArgumentException.class,
+                () -> exhausted.requireSuccessor(new ManifestState(6, 4, 0, 0, List.of(Long.MAX_VALUE - 1))));
+    }
+
+    @Test
+    void anAlreadyReservedOutputCanPublishAfterTheLastWalIdWasAllocated() {
+        ManifestState before = new ManifestState(5, 4, 0, 0, List.of(3L, 5L));
+        ManifestState rotated = new ManifestState(6, Long.MAX_VALUE, 4, 300, List.of(3L, 5L));
+        before.requireSuccessor(rotated);
+        ManifestState compacted = new ManifestState(7, Long.MAX_VALUE, 4, 300, List.of(6L));
+        rotated.requireSuccessor(compacted);
+        assertEquals(Long.MAX_VALUE, compacted.maxFileId());
     }
 
     private static ManifestState initial() {

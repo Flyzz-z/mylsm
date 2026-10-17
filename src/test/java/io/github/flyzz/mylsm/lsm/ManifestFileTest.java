@@ -431,6 +431,161 @@ class ManifestFileTest {
         assertEquals(1, io.closeCalls);
     }
 
+    @Test
+    void appendsCompactionAfterRotationAndRecoversFrozenBeforeItsLaterPublication() throws IOException {
+        Path path = directory.resolve("MANIFEST");
+        List<ManifestState> prefix = compactionPrefix();
+        ManifestState compacted = compacted(prefix.getLast());
+        ManifestState laterFlush = new ManifestState(8, 7, 0, 0, List.of(6L, 8L));
+        try (ManifestFile file = ManifestFile.create(path, prefix.getFirst())) {
+            for (int i = 1; i < prefix.size(); i++) {
+                file.append(prefix.get(i));
+            }
+            byte[] before = Files.readAllBytes(path);
+            file.append(compacted);
+            assertEquals(compacted, file.current());
+            assertArrayEquals(before, Arrays.copyOf(Files.readAllBytes(path), before.length));
+        }
+        try (ManifestFile reopened = ManifestFile.open(path)) {
+            assertEquals(compacted, reopened.current());
+            assertEquals(7, reopened.current().activeWalId());
+            assertEquals(4, reopened.current().frozenWalId());
+            assertEquals(300, reopened.current().frozenWalLength());
+            reopened.append(laterFlush);
+        }
+        try (ManifestFile reopened = ManifestFile.open(path)) {
+            assertEquals(laterFlush, reopened.current());
+        }
+        assertArrayEquals(concatenate(history(prefix.toArray(ManifestState[]::new)),
+                concatenate(ManifestCodec.encode(compacted), ManifestCodec.encode(laterFlush))),
+                Files.readAllBytes(path));
+    }
+
+    @Test
+    void installsCompactedCurrentOnlyAfterTheNewFrameIsSynced() throws IOException {
+        Path path = directory.resolve("MANIFEST");
+        List<ManifestState> prefix = compactionPrefix();
+        ManifestState before = prefix.getLast();
+        ManifestState compacted = compacted(before);
+        byte[] original = history(prefix.toArray(ManifestState[]::new));
+        Files.write(path, original);
+        FaultIo io = new FaultIo(path, false);
+        io.writeLimit = 3;
+        try (ManifestFile file = ManifestFile.open(io)) {
+            io.onForce = () -> {
+                assertEquals(before, file.current());
+                assertArrayEquals(concatenate(original, ManifestCodec.encode(compacted)), Files.readAllBytes(path));
+            };
+            file.append(compacted);
+            assertEquals(compacted, file.current());
+            assertEquals(1, io.forceCalls);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void repairsEveryCutInACompactionFrameWithoutLosingTheOldWalState(boolean frozen) throws IOException {
+        List<ManifestState> history = compactionPrefix();
+        List<ManifestState> prefix = frozen ? history : history.subList(0, history.size() - 1);
+        ManifestState before = prefix.getLast();
+        ManifestState compacted = compacted(before);
+        ManifestState following = frozen
+                ? new ManifestState(8, 7, 0, 0, List.of(6L, 8L))
+                : new ManifestState(7, 7, 4, 300, List.of(6L));
+        byte[] original = history(prefix.toArray(ManifestState[]::new));
+        byte[] frame = ManifestCodec.encode(compacted);
+        for (int cut = 0; cut < frame.length; cut++) {
+            Path path = directory.resolve("compaction-cut-" + frozen + "-" + cut);
+            Files.write(path, concatenate(original, Arrays.copyOf(frame, cut)));
+            FaultIo io = new FaultIo(path, false);
+            try (ManifestFile recovered = ManifestFile.open(io)) {
+                assertEquals(before, recovered.current());
+                assertEquals(original.length, Files.size(path));
+                assertEquals(cut == 0 ? 0 : 1, io.truncateCalls);
+                assertEquals(cut == 0 ? 0 : 1, io.forceCalls);
+                recovered.append(compacted);
+                recovered.append(following);
+            }
+            assertArrayEquals(concatenate(original, concatenate(frame, ManifestCodec.encode(following))),
+                    Files.readAllBytes(path));
+        }
+    }
+
+    @Test
+    void failedCompactionSyncStillAllowsRecoveryOfTheCompleteNewFileSet() throws IOException {
+        Path path = directory.resolve("MANIFEST");
+        List<ManifestState> prefix = compactionPrefix();
+        ManifestState compacted = compacted(prefix.getLast());
+        byte[] original = history(prefix.toArray(ManifestState[]::new));
+        Files.write(path, original);
+        FaultIo io = new FaultIo(path, false);
+        io.failForceCall = 1;
+        try (ManifestFile file = ManifestFile.open(io)) {
+            assertSame(io.forceFailure, assertThrows(IOException.class, () -> file.append(compacted)));
+            assertStopped(file);
+        }
+        // 报错不代表回滚：完整帧仍可能被恢复采用，不能先回收新旧任一恢复来源。
+        assertArrayEquals(concatenate(original, ManifestCodec.encode(compacted)), Files.readAllBytes(path));
+        try (ManifestFile recovered = ManifestFile.open(path)) {
+            assertEquals(compacted, recovered.current());
+            recovered.append(new ManifestState(8, 7, 0, 0, List.of(6L, 8L)));
+        }
+    }
+
+    @Test
+    void invalidCompactionIsRejectedBeforeIoAndDoesNotPoisonTheManifest() throws IOException {
+        Path path = directory.resolve("MANIFEST");
+        List<ManifestState> prefix = compactionPrefix();
+        byte[] original = history(prefix.toArray(ManifestState[]::new));
+        Files.write(path, original);
+        FaultIo io = new FaultIo(path, false);
+        try (ManifestFile file = ManifestFile.open(io)) {
+            for (ManifestState invalid : invalidCompactions()) {
+                assertThrows(IllegalArgumentException.class, () -> file.append(invalid));
+                assertEquals(prefix.getLast(), file.current());
+                assertEquals(0, io.writeCalls);
+                assertEquals(0, io.forceCalls);
+                assertArrayEquals(original, Files.readAllBytes(path));
+            }
+            file.append(compacted(prefix.getLast()));
+        }
+    }
+
+    @Test
+    void recoveryRejectsCrcValidButIllegalCompactionInsteadOfFallingBack() throws IOException {
+        byte[] original = history(compactionPrefix().toArray(ManifestState[]::new));
+        int index = 0;
+        for (ManifestState invalid : invalidCompactions()) {
+            byte[] frame = ManifestCodec.encode(invalid);
+            assertEquals(invalid, ManifestCodec.decode(frame)); // 单个状态和 CRC 合法，历史语义不合法。
+            assertInvalidHistory("bad-compaction-" + index++, original, frame, Integer.toString(original.length));
+        }
+    }
+
+    private static List<ManifestState> compactionPrefix() {
+        return List.of(initial(), rotated(), published(),
+                new ManifestState(4, 4, 2, 200, List.of(3L)),
+                new ManifestState(5, 4, 0, 0, List.of(3L, 5L)),
+                new ManifestState(6, 7, 4, 300, List.of(3L, 5L)));
+    }
+
+    private static ManifestState compacted(ManifestState before) {
+        return new ManifestState(before.revision() + 1, before.activeWalId(), before.frozenWalId(),
+                before.frozenWalLength(), List.of(6L));
+    }
+
+    private static List<ManifestState> invalidCompactions() {
+        return List.of(
+                new ManifestState(7, 4, 0, 0, List.of(6L)), // 使用压缩开始前的过时 WAL 快照。
+                new ManifestState(7, 8, 4, 300, List.of(6L)), // 同时修改 active。
+                new ManifestState(7, 7, 4, 301, List.of(6L)), // 修改封存长度。
+                new ManifestState(7, 7, 0, 0, List.of(6L)), // 丢弃仍需的 frozen。
+                new ManifestState(7, 7, 4, 300, List.of(3L)), // 复用输入编号。
+                new ManifestState(7, 7, 4, 300, List.of()),
+                new ManifestState(7, 7, 4, 300, List.of(3L, 5L)), // 不接受无操作状态提交。
+                new ManifestState(7, 7, 4, 300, List.of(3L, 6L))); // 部分替换。
+    }
+
     private void assertInvalidHistory(String name, byte[] prefix, byte[] frame, String offset)
             throws IOException {
         Path path = directory.resolve(name);

@@ -52,13 +52,21 @@ record ManifestState(long revision, long activeWalId, long frozenWalId,
     }
 
     /**
-     * 只接受日志轮换或单个冻结代的发布，不修改任一状态。
-     * 新编号严格大于当前全部编号；沿合法历史此上界不会下降，因此也拒绝历史编号复用。
+     * 只接受日志轮换、单个冻结代发布或全量 SSTable 替换，不修改任一状态。
+     * 压缩保持日志状态，输出大于全部输入 SST 编号；允许小于期间新建的 WAL 编号。
+     * 沿合法历史，被移除的引用编号均不超过 SST 上界，配合当前引用查重拒绝历史复用。
      */
     void requireSuccessor(ManifestState next) {
         Objects.requireNonNull(next, "next");
         if (revision == Long.MAX_VALUE || next.revision != revision + 1) {
             throw new IllegalArgumentException("Manifest revisions must be consecutive without overflow");
+        }
+        if (sstIds.size() >= 2 && next.sstIds.size() == 1) {
+            if (next.activeWalId != activeWalId || next.frozenWalId != frozenWalId
+                    || next.frozenWalLength != frozenWalLength || next.sstIds.getFirst() <= maxSstId()) {
+                throw new IllegalArgumentException("Invalid Manifest full compaction replacement");
+            }
+            return;
         }
         long maxId = maxFileId();
         if (frozenWalId == 0) {
@@ -78,7 +86,11 @@ record ManifestState(long revision, long activeWalId, long frozenWalId,
 
     /** 这是有效引用的上界；文件分配器以后还须考虑目录中的孤儿编号。 */
     long maxFileId() {
-        long max = Math.max(activeWalId, frozenWalId);
+        return Math.max(Math.max(activeWalId, frozenWalId), maxSstId());
+    }
+
+    private long maxSstId() {
+        long max = 0;
         for (long id : sstIds) {
             max = Math.max(max, id);
         }

@@ -61,4 +61,4 @@ sources 为每路保存 generation、游标和头记录。heads 最小堆只保�
 
 `./mvnw test` 和 `./mvnw clean verify` 均通过，共 560 个用例、0 失败；`openspec validate --all --strict --no-interactive` 通过。
 
-下一小步讨论并实现 Manifest 的受限替换转换，再在后续接入后台任务、请求等待和文件回收。
+后续已实现 [Manifest 的受限替换转换](manifest-compaction.md)；后台任务、请求等待和文件回收仍待后续接入。

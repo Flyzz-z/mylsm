@@ -1,6 +1,6 @@
 ## Context
 
-阶段 4 已归档。LsmStore 前台串行调用，内部一个后台 flush 线程；有效 SSTable 按 Manifest 清单从旧到新排列。SsTableReader 只有点查和不可暂停的 scan，Writer 接受有序 Iterable。ManifestState 只允许日志轮换和冻结代发布。
+本阶段开始时，阶段 4 已归档。LsmStore 前台串行调用，内部一个后台 flush 线程；有效 SSTable 按 Manifest 清单从旧到新排列。SsTableReader 只有点查和不可暂停的 scan，Writer 接受有序 Iterable。ManifestState 只允许日志轮换和冻结代发布。
 
 动机见 proposal.md。用户讨论后已确认：单后台线程、自动阈值触发与同步手动调用、全部已发布表归并为一张、保留 Tombstone。按小步实现，不照搬 LevelDB 分层和 MVCC。
 
@@ -61,7 +61,7 @@ Writer 的 Iterable 无 checked I/O：局部适配为 UncheckedIOException，在
 
 唯一后台线程保证期间没有另一次 SSTable 发布，但前台可以轮换 WAL。提交时从最新 Manifest 构造后继，完整保留 active、frozen 及封存长度，仅把仍匹配的输入集替换为单张输出，revision 恰好加一。拒绝部分删除、空清单、任意重排及同时改变 WAL 的替换；原有轮换/flush 校验保留。
 
-输出在开始时分配，可能小于随后新建的 WAL 编号，不能要求其大于提交前全部引用。压缩输出须大于全部输入 SST 编号且不与当前 WAL 重合；运行时分配器仍避开全部已分配编号和目录孤儿。合法历史中 SST 最大编号严格增加，被回收 WAL 均由更大 SST 输出覆盖，因此已不在当前引用中的历史编号不超过 SST 上界；配合当前 WAL 查重拒绝历史引用编号复用。全体引用最大值仍不下降。Manifest 小步须用交错轮换历史验证此证明。
+输出在开始时分配，可能小于随后新建的 WAL 编号，不能要求其大于提交前全部引用。压缩输出须大于全部输入 SST 编号且不与当前 WAL 重合；运行时分配器仍避开全部已分配编号和目录孤儿。合法历史中 SST 最大编号在 flush 发布和压缩替换时严格增加，轮换时不变，被回收 WAL 均由更大 SST 输出覆盖，因此已不在当前引用中的历史编号不超过 SST 上界；配合当前 WAL 查重拒绝历史引用编号复用。全体引用最大值仍不下降。本步已通过交错轮换、重复压缩与恢复历史验证此证明，见 docs/manifest-compaction.md。
 
 沿用帧结构。旧程序不能识别压缩转换，不支持旧二进制回退打开已压缩数据库。
 
@@ -93,4 +93,4 @@ Writer 的 Iterable 无 checked I/O：局部适配为 UncheckedIOException，在
 
 ## Migration Plan
 
-按已确认方案分步实现；已完成游标，当前推进多路归并与针对性验证，留出讨论空间再推进 Manifest 替换。正式 specs 不提前修改，验收和学习复盘完成后再同步并归档，不推送。
+按已确认方案分步实现；已完成游标、多路归并和 Manifest 替换校验及恢复验证，留出讨论空间后再接入后台构建、发布与请求调度。正式 specs 不提前修改，验收和学习复盘完成后再同步并归档，不推送。

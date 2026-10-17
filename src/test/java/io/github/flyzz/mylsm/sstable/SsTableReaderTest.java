@@ -487,6 +487,7 @@ class SsTableReaderTest {
             reader.scan(record -> {
                 assertThrows(IllegalStateException.class, () -> reader.get(record.key()));
                 assertThrows(IllegalStateException.class, () -> reader.scan(ignored -> {}));
+                assertThrows(IllegalStateException.class, reader::openCursor);
                 assertThrows(IllegalStateException.class, reader::close);
                 assertEquals(0, input.closeCalls);
                 produced.add(record);
@@ -614,6 +615,241 @@ class SsTableReaderTest {
         int[] callbacks = {0};
         assertThrows(IllegalStateException.class, () -> reader.scan(ignored -> callbacks[0]++));
         assertEquals(0, callbacks[0]);
+        reader.close();
+        assertEquals(1, input.closeCalls);
+    }
+
+    @Test
+    void emptyCursorHasNoPositionAndDoesNotReadDataEvenAfterRepeatedExhaustion() throws IOException {
+        Path path = directory.resolve("empty-cursor.sst");
+        SsTableWriter.write(path, List.of());
+        RecordingInput input = new RecordingInput(path);
+        try (SsTableReader reader = SsTableReader.open(input)) {
+            input.clearReads();
+            try (SsTableReader.Cursor cursor = reader.openCursor()) {
+                assertThrows(IllegalStateException.class, cursor::record);
+                assertFalse(cursor.next());
+                assertFalse(cursor.next());
+                assertThrows(IllegalStateException.class, cursor::record);
+                // 即使空表已耗尽，仍须显式关闭游标后才能进行其他读操作。
+                assertThrows(IllegalStateException.class, reader::openCursor);
+                assertThrows(IllegalStateException.class, () -> reader.get(SAMPLE.key()));
+            }
+            assertEquals(Optional.empty(), reader.get(SAMPLE.key()));
+            assertTrue(input.readOffsets.isEmpty());
+        }
+        assertEquals(1, input.closeCalls);
+    }
+
+    @Test
+    void cursorLoadsOnlyTheNeededBlockAndRepeatedRecordDoesNotAdvance() throws IOException {
+        SsTableRecord a = deletion(new byte[]{1});
+        SsTableRecord b = deletion(new byte[]{2});
+        SsTableRecord c = deletion(new byte[]{3});
+        Path path = writeBlocks(List.of(List.of(a, b), List.of(c)), List.of());
+        List<IndexEntry> entries = index(Files.readAllBytes(path));
+        RecordingInput input = new RecordingInput(path);
+        try (SsTableReader reader = SsTableReader.open(input)) {
+            input.clearReads();
+            try (SsTableReader.Cursor cursor = reader.openCursor()) {
+                assertTrue(input.readOffsets.isEmpty());
+                assertThrows(IllegalStateException.class, cursor::record);
+                assertTrue(cursor.next());
+                assertEquals(a, cursor.record());
+                assertSame(cursor.record(), cursor.record());
+                assertEquals(entries.getFirst().frameLength(), input.bytesRead);
+                int callsAfterFirstBlock = input.readOffsets.size();
+                assertTrue(cursor.next());
+                assertEquals(b, cursor.record());
+                assertEquals(callsAfterFirstBlock, input.readOffsets.size());
+                assertTrue(cursor.next());
+                assertEquals(c, cursor.record());
+                assertEquals(entries.stream().mapToInt(IndexEntry::frameLength).sum(), input.bytesRead);
+                assertFalse(cursor.next());
+                assertThrows(IllegalStateException.class, cursor::record);
+                int callsAfterLastBlock = input.readOffsets.size();
+                assertFalse(cursor.next());
+                assertEquals(callsAfterLastBlock, input.readOffsets.size());
+            }
+        }
+    }
+
+    @Test
+    void cursorPreservesBinaryRecordsAndTombstonesAcrossBlocks() throws IOException {
+        List<SsTableRecord> records = List.of(value(new byte[0], new byte[0]),
+                deletion(new byte[]{0}), value(new byte[]{0, 1}, new byte[5000]),
+                value(new byte[]{0, (byte) 0xff}, new byte[5000]), deletion(new byte[]{0x7f}),
+                value(new byte[]{(byte) 0x80}, new byte[0]), deletion(new byte[]{(byte) 0xff}));
+        Path path = directory.resolve("binary-cursor.sst");
+        SsTableWriter.write(path, records);
+        byte[] original = Files.readAllBytes(path);
+        assertTrue(index(original).size() > 1);
+        try (SsTableReader reader = SsTableReader.open(path);
+             SsTableReader.Cursor cursor = reader.openCursor()) {
+            List<SsTableRecord> actual = new ArrayList<>();
+            while (cursor.next()) {
+                actual.add(cursor.record());
+            }
+            assertEquals(records, actual);
+        }
+        assertArrayEquals(original, Files.readAllBytes(path));
+    }
+
+    @Test
+    void independentReadersCanPauseAndAlternateCursorAdvancement() throws IOException {
+        Path path = threeBlockTable();
+        try (SsTableReader first = SsTableReader.open(path);
+             SsTableReader second = SsTableReader.open(path);
+             SsTableReader.Cursor left = first.openCursor();
+             SsTableReader.Cursor right = second.openCursor()) {
+            assertTrue(left.next());
+            assertTrue(right.next());
+            assertEquals(left.record(), right.record());
+            assertTrue(right.next());
+            assertEquals(key(new byte[]{1}), left.record().key());
+            assertEquals(key(new byte[]{2}), right.record().key());
+            assertTrue(left.next());
+            assertEquals(left.record(), right.record());
+            assertTrue(left.next());
+            assertFalse(left.next());
+            assertTrue(right.next());
+            assertEquals(key(new byte[]{3}), right.record().key());
+            assertFalse(right.next());
+        }
+    }
+
+    @Test
+    void earlyCursorCloseRestoresReaderAndAnOldCloseCannotReleaseANewCursor() throws IOException {
+        RecordingInput input = new RecordingInput(threeBlockTable());
+        try (SsTableReader reader = SsTableReader.open(input)) {
+            SsTableReader.Cursor first = reader.openCursor();
+            assertTrue(first.next());
+            assertThrows(IllegalStateException.class, () -> reader.get(key(new byte[]{1})));
+            assertThrows(IllegalStateException.class, () -> reader.scan(ignored -> {}));
+            assertThrows(IllegalStateException.class, reader::openCursor);
+            assertEquals(key(new byte[]{1}), first.record().key());
+            first.close();
+            assertEquals(0, input.closeCalls);
+            assertThrows(IllegalStateException.class, first::next);
+            assertThrows(IllegalStateException.class, first::record);
+            assertTrue(reader.get(key(new byte[]{3})).isPresent());
+            List<SsTableRecord> rescanned = new ArrayList<>();
+            reader.scan(rescanned::add);
+            assertEquals(3, rescanned.size());
+            try (SsTableReader.Cursor second = reader.openCursor()) {
+                first.close();
+                assertThrows(IllegalStateException.class, reader::openCursor);
+                assertTrue(second.next());
+                assertEquals(key(new byte[]{1}), second.record().key());
+            }
+        }
+        assertEquals(1, input.closeCalls);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2})
+    void cursorReportsCorruptionWithoutReturningBadOrStaleRecords(int brokenBlock) throws IOException {
+        Path path = threeBlockTable();
+        byte[] bytes = Files.readAllBytes(path);
+        List<IndexEntry> entries = index(bytes);
+        bytes[(int) entries.get(brokenBlock).offset() + 4] ^= 1;
+        Files.write(path, bytes);
+        RecordingInput input = new RecordingInput(path);
+        try (SsTableReader reader = SsTableReader.open(input);
+             SsTableReader.Cursor cursor = reader.openCursor()) {
+            for (int i = 0; i < brokenBlock; i++) {
+                assertTrue(cursor.next());
+                assertEquals(key(new byte[]{(byte) (i + 1)}), cursor.record().key());
+            }
+            assertThrows(IOException.class, cursor::next);
+            int callsAfterFailure = input.readOffsets.size();
+            assertThrows(IllegalStateException.class, cursor::record);
+            assertThrows(IllegalStateException.class, cursor::next);
+            assertThrows(IllegalStateException.class, () -> reader.get(key(new byte[]{1})));
+            assertThrows(IllegalStateException.class, () -> reader.scan(ignored -> {}));
+            assertThrows(IllegalStateException.class, reader::openCursor);
+            assertEquals(callsAfterFailure, input.readOffsets.size());
+        }
+        assertEquals(1, input.closeCalls);
+        assertArrayEquals(bytes, Files.readAllBytes(path));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"maximum", "overlap", "malformed"})
+    void cursorValidatesTheWholeBlockAndItsIndexedBoundariesBeforeEmission(String mode) throws IOException {
+        List<SsTableRecord> first = List.of(deletion(new byte[]{1}));
+        List<SsTableRecord> second = mode.equals("overlap")
+                ? List.of(deletion(new byte[]{1}), deletion(new byte[]{3}))
+                : List.of(deletion(new byte[]{2}), deletion(new byte[]{3}));
+        List<ByteKey> overrides = mode.equals("maximum")
+                ? List.of(key(new byte[]{1}), key(new byte[]{4})) : List.of();
+        Path path = writeBlocks(List.of(first, second), overrides);
+        if (mode.equals("malformed")) {
+            byte[] bytes = Files.readAllBytes(path);
+            IndexEntry block = index(bytes).get(1);
+            bytes[(int) block.offset() + 22] = 3; // 第二条 kind 非法；重算 CRC 以验证内容检查。
+            updateFrameChecksum(bytes, (int) block.offset(), block.frameLength());
+            Files.write(path, bytes);
+        }
+        try (SsTableReader reader = SsTableReader.open(path);
+             SsTableReader.Cursor cursor = reader.openCursor()) {
+            assertTrue(cursor.next());
+            assertEquals(first.getFirst(), cursor.record());
+            assertThrows(IOException.class, cursor::next);
+            assertThrows(IllegalStateException.class, cursor::record);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"none", "error", "zero", "eof"})
+    @Timeout(3)
+    void cursorHandlesShortReadsAndExplicitIoFailures(String mode) throws IOException {
+        Path path = threeBlockTable();
+        long secondOffset = index(Files.readAllBytes(path)).get(1).offset();
+        RecordingInput input = new RecordingInput(path);
+        try (SsTableReader reader = SsTableReader.open(input);
+             SsTableReader.Cursor cursor = reader.openCursor()) {
+            input.maxRead = 17;
+            input.clearReads();
+            assertTrue(cursor.next());
+            assertEquals(key(new byte[]{1}), cursor.record().key());
+            if (mode.equals("none")) {
+                assertTrue(cursor.next());
+                assertTrue(cursor.next());
+                assertEquals(key(new byte[]{3}), cursor.record().key());
+                assertFalse(cursor.next());
+            } else {
+                input.failureOffset = secondOffset;
+                input.failureMode = mode;
+                IOException failure = assertThrows(IOException.class, cursor::next);
+                if (mode.equals("error")) {
+                    assertSame(input.failure, failure);
+                }
+                assertThrows(IllegalStateException.class, cursor::next);
+                assertThrows(IllegalStateException.class, cursor::record);
+            }
+            assertTrue(input.readOffsets.size() > 3);
+        }
+        assertEquals(1, input.closeCalls);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void closingReaderInvalidatesAnActiveCursorEvenWhenFileCloseFails(boolean failClose) throws IOException {
+        RecordingInput input = new RecordingInput(sampleTable());
+        SsTableReader reader = SsTableReader.open(input);
+        SsTableReader.Cursor cursor = reader.openCursor();
+        assertTrue(cursor.next());
+        input.failClose = failClose;
+        if (failClose) {
+            assertSame(input.closeFailure, assertThrows(IOException.class, reader::close));
+        } else {
+            reader.close();
+        }
+        assertThrows(IllegalStateException.class, cursor::next);
+        assertThrows(IllegalStateException.class, cursor::record);
+        assertThrows(IllegalStateException.class, reader::openCursor);
+        cursor.close();
         reader.close();
         assertEquals(1, input.closeCalls);
     }

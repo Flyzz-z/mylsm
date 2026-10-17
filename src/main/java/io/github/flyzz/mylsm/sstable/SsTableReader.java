@@ -18,7 +18,7 @@ import java.util.function.Consumer;
 
 import static java.nio.file.StandardOpenOption.READ;
 
-/** 单线程只读 SSTable；元信息在打开时验证，数据块按访问时验证，不缓存数据块。 */
+/** 单线程只读 SSTable；元信息在打开时验证，数据块按访问时验证，无跨操作块缓存。 */
 public final class SsTableReader implements AutoCloseable {
     private enum State { OPEN, FAILED, CLOSED }
 
@@ -26,6 +26,7 @@ public final class SsTableReader implements AutoCloseable {
     private final List<IndexEntry> index;
     private State state = State.OPEN;
     private boolean scanning;
+    private Cursor cursor;
 
     private SsTableReader(ReadIo input, List<IndexEntry> index) {
         this.input = input;
@@ -74,7 +75,7 @@ public final class SsTableReader implements AutoCloseable {
     /**
      * 点查并保留 Value、Tombstone 与缺失三态；读取整个候选块并验证后才返回结果。
      *
-     * @throws IllegalStateException 如果实例已关闭、发生过文件错误，或在 scan 回调中重入
+     * @throws IllegalStateException 如果实例已关闭、发生过文件错误、正在 scan 或持有游标
      * @throws NullPointerException 如果 key 为 null；参数错误不使实例失效
      * @throws IOException 如果读取或块验证失败；此后仅允许 close
      */
@@ -108,7 +109,7 @@ public final class SsTableReader implements AutoCloseable {
      * 文件错误使实例失效；回调自身抛错只终止本次遍历，不回滚已产生的副作用。
      * 回调不得重入或关闭本 Reader，也不得修改正在读取的文件。
      *
-     * @throws IllegalStateException 如果实例已关闭、已失败或正在 scan
+     * @throws IllegalStateException 如果实例已关闭、已失败、正在 scan 或持有游标
      * @throws NullPointerException 如果 consumer 为 null；参数错误不使实例失效
      * @throws IOException 如果读取或块验证失败；此后仅允许 close
      */
@@ -136,7 +137,91 @@ public final class SsTableReader implements AutoCloseable {
     }
 
     /**
-     * 先变为 CLOSED 再释放资源；关闭失败后仍不能使用，重复关闭不重复操作资源。
+     * 创建可暂停的有序游标，不预读数据块；调用方须显式关闭，包括正常耗尽后。
+     * 游标存活期间独占本 Reader 的读操作；关闭游标不关闭底层文件。
+     *
+     * @throws IllegalStateException 如果实例已关闭、已失败、正在 scan 或已有游标
+     */
+    public Cursor openCursor() {
+        requireAvailable();
+        cursor = new Cursor();
+        return cursor;
+    }
+
+    /** 单线程拉取游标，最多保留一个已验证数据块；不实现会隐藏 checked I/O 的 Iterator。 */
+    public final class Cursor implements AutoCloseable {
+        private List<SsTableRecord> records = List.of();
+        private int nextBlock;
+        private int recordIndex = -1;
+        private boolean closed;
+
+        private Cursor() {
+        }
+
+        /**
+         * 推进到下一条；仅需要下一块时才读取并完整验证它。
+         * 耗尽后重复返回 false，直到关闭；失败后 Reader 及游标都不可再读。
+         *
+         * @throws IOException 如果数据块读取或验证失败
+         * @throws IllegalStateException 如果游标已关闭或 Reader 已失效
+         */
+        public boolean next() throws IOException {
+            requireUsable();
+            if (recordIndex + 1 < records.size()) {
+                recordIndex++;
+                return true;
+            }
+            // 先清除旧位置和块引用，避免失败后暴露旧记录或在读下一块时持有两块。
+            clearPosition();
+            if (nextBlock == index.size()) {
+                return false;
+            }
+            try {
+                records = readBlock(nextBlock);
+                nextBlock++;
+                recordIndex = 0;
+                return true;
+            } catch (IOException failure) {
+                state = State.FAILED;
+                throw failure;
+            }
+        }
+
+        /** 返回最近一次成功推进的不可变记录；重复读取不推进游标。 */
+        public SsTableRecord record() {
+            requireUsable();
+            if (recordIndex < 0) {
+                throw new IllegalStateException("SSTable cursor has no current record");
+            }
+            return records.get(recordIndex);
+        }
+
+        /** 释放当前位置、块缓冲及 Reader 占用，不关闭文件；重复关闭安全。 */
+        @Override
+        public void close() {
+            if (!closed) {
+                closed = true;
+                clearPosition();
+                cursor = null;
+            }
+        }
+
+        private void clearPosition() {
+            records = List.of();
+            recordIndex = -1;
+        }
+
+        private void requireUsable() {
+            if (closed) {
+                throw new IllegalStateException("SSTable cursor is closed");
+            }
+            requireOpen();
+        }
+    }
+
+    /**
+     * 先变为 CLOSED 并关闭现有游标，再释放文件；关闭失败后仍不能使用。
+     * 重复关闭不重复操作资源。
      * scan 回调期间禁止关闭，抛 IllegalStateException，不改变生命周期。
      */
     @Override
@@ -146,6 +231,9 @@ public final class SsTableReader implements AutoCloseable {
         }
         if (state != State.CLOSED) {
             state = State.CLOSED;
+            if (cursor != null) {
+                cursor.close();
+            }
             input.close();
         }
     }
@@ -180,11 +268,18 @@ public final class SsTableReader implements AutoCloseable {
     }
 
     private void requireAvailable() {
-        if (state != State.OPEN) {
-            throw new IllegalStateException("SSTable reader is " + state);
-        }
+        requireOpen();
         if (scanning) {
             throw new IllegalStateException("Cannot reenter SSTable reader during scan");
+        }
+        if (cursor != null) {
+            throw new IllegalStateException("SSTable reader has an active cursor");
+        }
+    }
+
+    private void requireOpen() {
+        if (state != State.OPEN) {
+            throw new IllegalStateException("SSTable reader is " + state);
         }
     }
 

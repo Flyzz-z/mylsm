@@ -8,6 +8,7 @@ import io.github.flyzz.mylsm.model.Entry;
 import io.github.flyzz.mylsm.model.Tombstone;
 import io.github.flyzz.mylsm.model.Value;
 import io.github.flyzz.mylsm.sstable.SsTableReader;
+import io.github.flyzz.mylsm.sstable.SsTableMerger;
 import io.github.flyzz.mylsm.sstable.SsTableRecord;
 import io.github.flyzz.mylsm.sstable.SsTableWriter;
 import io.github.flyzz.mylsm.wal.WalCodec;
@@ -16,13 +17,16 @@ import io.github.flyzz.mylsm.wal.WalWriter;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.io.UncheckedIOException;
 import java.nio.file.DirectoryIteratorException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.locks.Condition;
@@ -33,18 +37,20 @@ import java.util.regex.Pattern;
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 
 /**
- * 目录级存储，前台串行调用，内部一个线程后台刷盘，调用方必须独占目录。
+ * 目录级存储，前台串行调用，内部一个线程串行刷盘及压缩，调用方必须独占目录。
  * 最多一个活跃表和一个冻结表；冻结槽位忙且活跃表已满时后续写入等待。
  */
 public final class LsmStore implements AutoCloseable {
     private static final Pattern INTERNAL_FILE = Pattern.compile("([1-9][0-9]*)\\.(wal|sst)");
     private static final FileOps FILES = new FileOps();
     private static final long DEFAULT_MEMTABLE_TARGET_BYTES = 4 * 1024 * 1024;
+    private static final int DEFAULT_COMPACTION_THRESHOLD = 4;
     private enum State { OPEN, FAILED, CLOSING, CLOSED }
 
     private final Path directory;
     private final ManifestFile manifest;
     private final long targetBytes;
+    private final int compactionThreshold;
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private WalWriter writer;
@@ -61,10 +67,11 @@ public final class LsmStore implements AutoCloseable {
 
     private LsmStore(Path directory, ManifestFile manifest, WalWriter writer, MemoryTable active,
                      MemoryTable frozen, List<SsTableReader> tables, List<AutoCloseable> owned,
-                     FileOps files, long maxFileId, long targetBytes) {
+                     FileOps files, long maxFileId, long targetBytes, int compactionThreshold) {
         this.directory = directory;
         this.manifest = manifest;
         this.targetBytes = targetBytes;
+        this.compactionThreshold = compactionThreshold;
         this.writer = writer;
         this.active = active;
         this.frozen = frozen == null ? null : new Frozen(frozen, manifest.current().frozenWalId());
@@ -88,15 +95,29 @@ public final class LsmStore implements AutoCloseable {
         return open(directory, memTableTargetBytes, FILES);
     }
 
+    /** 自动压缩的已发布 SSTable 数量阈值至少为 2；默认 4，不要求内存数据先刷盘。 */
+    public static LsmStore open(Path directory, long memTableTargetBytes, int compactionThreshold)
+            throws IOException {
+        return open(directory, memTableTargetBytes, compactionThreshold, FILES);
+    }
+
     static LsmStore open(Path directory, FileOps files) throws IOException {
         return open(directory, DEFAULT_MEMTABLE_TARGET_BYTES, files);
     }
 
     static LsmStore open(Path directory, long memTableTargetBytes, FileOps files) throws IOException {
+        return open(directory, memTableTargetBytes, DEFAULT_COMPACTION_THRESHOLD, files);
+    }
+
+    static LsmStore open(Path directory, long memTableTargetBytes, int compactionThreshold, FileOps files)
+            throws IOException {
         Objects.requireNonNull(directory, "directory");
         Objects.requireNonNull(files, "files");
         if (memTableTargetBytes <= 0) {
             throw new IllegalArgumentException("MemTable target must be positive");
+        }
+        if (compactionThreshold < 2) {
+            throw new IllegalArgumentException("Compaction threshold must be at least 2");
         }
         if (!Files.readAttributes(directory, BasicFileAttributes.class).isDirectory()) {
             throw new IOException("LSM path is not a directory: " + directory);
@@ -149,7 +170,7 @@ public final class LsmStore implements AutoCloseable {
                 owned.add(writer);
             }
             LsmStore store = new LsmStore(directory, manifest, writer, active, frozen, tables,
-                    owned, files, maxId, memTableTargetBytes);
+                    owned, files, maxId, memTableTargetBytes, compactionThreshold);
             store.worker = Objects.requireNonNull(files.newWorker(store::runWorker), "worker");
             cleanupOrphans(directory, manifest.current(), files);
             store.worker.start();
@@ -347,7 +368,7 @@ public final class LsmStore implements AutoCloseable {
         try {
             state = State.CLOSED;
             failure = backgroundFailure == null ? null
-                    : new IOException("Background SSTable flush failed", backgroundFailure);
+                    : new IOException("Background SSTable work failed", backgroundFailure);
             failure = closeResources(owned, failure);
             owned = List.of();
         } finally {
@@ -411,24 +432,36 @@ public final class LsmStore implements AutoCloseable {
     private void runWorker() {
         try {
             while (true) {
-                Frozen job;
+                Frozen job = null;
+                Compaction compaction = null;
                 long outputId;
-                List<MemTableRecord> snapshot;
+                List<MemTableRecord> snapshot = null;
                 lock.lock();
                 try {
-                    while (frozen == null && state == State.OPEN) {
+                    while (frozen == null && tables.size() < compactionThreshold && state == State.OPEN) {
                         changed.awaitUninterruptibly();
                     }
-                    if (frozen == null || state == State.FAILED || state == State.CLOSED) {
+                    if (state == State.FAILED || state == State.CLOSED) {
                         return;
                     }
-                    job = frozen;
-                    outputId = allocateFileIdLocked();
-                    snapshot = job.memory().table.snapshot();
+                    if (frozen != null) {
+                        job = frozen;
+                        outputId = allocateFileIdLocked();
+                        snapshot = job.memory().table.snapshot();
+                    } else if (state == State.OPEN && tables.size() >= compactionThreshold) {
+                        outputId = allocateFileIdLocked();
+                        compaction = new Compaction(manifest.current().sstIds(), List.copyOf(tables), outputId);
+                    } else {
+                        return; // CLOSING 时不再开始新的自动压缩。
+                    }
                 } finally {
                     lock.unlock();
                 }
-                writeAndPublish(job, outputId, snapshot);
+                if (job != null) {
+                    writeAndPublish(job, outputId, snapshot);
+                } else {
+                    compactAndPublish(compaction);
+                }
             }
         } catch (IOException | RuntimeException | Error failure) {
             lock.lock();
@@ -437,6 +470,121 @@ public final class LsmStore implements AutoCloseable {
             } finally {
                 lock.unlock();
             }
+        }
+    }
+
+    /** 固定全部 SST 输入，锁外构建；发布时保留最新 WAL 状态。 */
+    private void compactAndPublish(Compaction job) throws IOException {
+        Path output = sstPath(directory, job.outputId());
+        List<SsTableReader> inputs = new ArrayList<>(job.ids().size());
+        SsTableReader reader = null;
+        Throwable primary = null;
+        try {
+            for (long id : job.ids()) {
+                inputs.add(registerTable(files.openTable(sstPath(directory, id))));
+            }
+            files.writeCompaction(output, inputs);
+            Throwable inputCloseFailure = closeTablesAndRelease(inputs, null);
+            inputs.clear(); // 关闭失败的仍由 owned 保留；finally 不重复调用关闭钩子。
+            throwIfFailed(inputCloseFailure);
+            reader = registerTable(files.openTable(output));
+            lock.lock();
+            try {
+                if (state == State.FAILED || state == State.CLOSED) {
+                    return; // 前台已失败，不提交新状态，保留输入和输出文件。
+                }
+                ManifestState previous = manifest.current();
+                if (!previous.sstIds().equals(job.ids())) {
+                    throw new IOException("Compaction input set changed before publication");
+                }
+                ManifestState next = new ManifestState(Math.incrementExact(previous.revision()),
+                        previous.activeWalId(), previous.frozenWalId(), previous.frozenWalLength(),
+                        List.of(job.outputId()));
+                List<SsTableReader> nextTables = List.of(reader);
+                files.commit(manifest, next);
+                tables = nextTables;
+                reader = null; // 输出已登记在 owned 中；提交后仅安装预构建引用。
+                changed.signalAll();
+            } finally {
+                lock.unlock();
+            }
+            throwIfFailed(closeTablesAndRelease(job.readers(), null));
+            for (long id : job.ids()) {
+                try {
+                    files.deleteObsolete(sstPath(directory, id));
+                } catch (IOException | RuntimeException ignored) {
+                    // 已提交输出是恢复来源；单个删除失败不阻止尝试其他旧文件。
+                }
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            primary = failure;
+            throw failure;
+        } finally {
+            Throwable cleanup = closeTablesAndRelease(inputs, primary);
+            if (reader != null) {
+                cleanup = closeTablesAndRelease(List.of(reader), cleanup);
+            }
+            if (primary == null) {
+                throwIfFailed(cleanup);
+            }
+        }
+    }
+
+    /** 临时 Reader 也登记最终释放路径，关闭与前台资源列表修改均通过同一把锁协调。 */
+    private SsTableReader registerTable(SsTableReader reader) {
+        lock.lock();
+        try {
+            try {
+                owned.add(reader);
+            } catch (RuntimeException | Error failure) {
+                closeResources(List.of(reader), failure);
+                throw failure;
+            }
+            return reader;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** 尝试关闭全部输入，仅将成功关闭的资源从 owned 移除；失败者留给 close。 */
+    private Throwable closeTablesAndRelease(List<SsTableReader> readers, Throwable failure) {
+        if (readers.isEmpty()) {
+            return failure;
+        }
+        var closed = new HashSet<SsTableReader>();
+        for (SsTableReader reader : readers) {
+            try {
+                files.closeTable(reader);
+                closed.add(reader);
+            } catch (IOException | RuntimeException | Error cleanupFailure) {
+                if (failure == null) {
+                    failure = cleanupFailure;
+                } else if (failure != cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
+        }
+        lock.lock();
+        try {
+            owned.removeIf(closed::contains);
+        } finally {
+            lock.unlock();
+        }
+        return failure;
+    }
+
+    private static void throwIfFailed(Throwable failure) throws IOException {
+        if (failure instanceof IOException ioFailure) {
+            throw ioFailure;
+        }
+        if (failure instanceof RuntimeException runtimeFailure) {
+            throw runtimeFailure;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        if (failure != null) {
+            throw new IOException("Failed to close SSTable resources", failure);
         }
     }
 
@@ -516,6 +664,9 @@ public final class LsmStore implements AutoCloseable {
     private record Frozen(MemoryTable memory, long walId) {
     }
 
+    private record Compaction(List<Long> ids, List<SsTableReader> readers, long outputId) {
+    }
+
     private static void requireRegularFile(Path path) throws IOException {
         if (!Files.readAttributes(path, BasicFileAttributes.class, NOFOLLOW_LINKS).isRegularFile()) {
             throw new IOException("Referenced LSM path is not a regular file: " + path);
@@ -593,7 +744,7 @@ public final class LsmStore implements AutoCloseable {
     /** 组合层的最小故障注入边界；方法返回前失败须自行清理尚未移交的资源。 */
     static class FileOps {
         Thread newWorker(Runnable task) {
-            return new Thread(task, "mylsm-flush");
+            return new Thread(task, "mylsm-background");
         }
 
         /** 包内测试阻塞点：调用时持状态锁，测试不得在此等待发布。 */
@@ -602,6 +753,53 @@ public final class LsmStore implements AutoCloseable {
 
         void writeTable(Path path, Iterable<SsTableRecord> records) throws IOException {
             SsTableWriter.write(path, records);
+        }
+
+        /** 单次流式消费归并器，checked 读取错误只在 Iterable 边界局部包装。 */
+        void writeCompaction(Path path, List<SsTableReader> inputs) throws IOException {
+            try (SsTableMerger merger = SsTableMerger.open(inputs)) {
+                Iterator<SsTableRecord> records = new Iterator<>() {
+                    private boolean ready;
+                    private boolean ended;
+
+                    @Override
+                    public boolean hasNext() {
+                        if (!ready && !ended) {
+                            try {
+                                ready = merger.next();
+                                ended = !ready;
+                            } catch (IOException failure) {
+                                throw new UncheckedIOException(failure);
+                            }
+                        }
+                        return ready;
+                    }
+
+                    @Override
+                    public SsTableRecord next() {
+                        if (!hasNext()) {
+                            throw new NoSuchElementException();
+                        }
+                        ready = false;
+                        return merger.record();
+                    }
+                };
+                try {
+                    writeTable(path, () -> records);
+                } catch (UncheckedIOException failure) {
+                    IOException original = failure.getCause();
+                    for (Throwable cleanup : failure.getSuppressed()) {
+                        if (cleanup != original) {
+                            original.addSuppressed(cleanup);
+                        }
+                    }
+                    throw original;
+                }
+            }
+        }
+
+        void closeTable(SsTableReader reader) throws IOException {
+            reader.close();
         }
 
         void commit(ManifestFile manifest, ManifestState next) throws IOException {

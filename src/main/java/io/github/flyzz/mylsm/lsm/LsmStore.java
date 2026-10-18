@@ -64,6 +64,7 @@ public final class LsmStore implements AutoCloseable {
     private State state = State.OPEN;
     private Throwable failure;
     private Throwable backgroundFailure;
+    private ManualCompaction manualCompaction; // 待处理或执行中；完成后才释放槽位。
 
     private LsmStore(Path directory, ManifestFile manifest, WalWriter writer, MemoryTable active,
                      MemoryTable frozen, List<SsTableReader> tables, List<AutoCloseable> owned,
@@ -238,6 +239,33 @@ public final class LsmStore implements AutoCloseable {
         }
     }
 
+    /**
+     * 先刷出调用前的内存数据，再交给唯一后台线程压缩并同步等待实际完成。
+     * 少于两张 SSTable 时无操作；中断保留标志，不取消已提交的刷盘或压缩。
+     * 前台仍须串行调用；上次等待中断后可再次调用，不覆盖尚未完成的请求。
+     */
+    public void compact() throws IOException {
+        flush();
+        lock.lock();
+        try {
+            requireOpen();
+            while (manualCompaction != null) {
+                awaitOpenProgress("compaction"); // 等前一次中断留下的请求释放槽位。
+            }
+            ManualCompaction request = new ManualCompaction();
+            manualCompaction = request;
+            changed.signalAll();
+            while (!request.done) {
+                awaitBackgroundProgress("compaction");
+            }
+            if (request.error != null) {
+                throw new IOException("Manual compaction failed", request.error);
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private Optional<Entry> getRecord(ByteKey key) throws IOException {
         try {
             Optional<Entry> result = active.table.get(key);
@@ -287,19 +315,28 @@ public final class LsmStore implements AutoCloseable {
 
     /** 调用者持锁；await 原子地释放锁等待，返回前重新持锁并检查生命周期。 */
     private void awaitFlushProgress() throws IOException {
+        awaitOpenProgress("flush");
+    }
+
+    private void awaitOpenProgress(String operation) throws IOException {
+        awaitBackgroundProgress(operation);
+        if (state == State.FAILED) {
+            throw new IOException("LSM failed while waiting for background " + operation, failure);
+        }
+        requireOpen();
+    }
+
+    /** 只等待通知；由调用方根据自己的完成条件判断结果，不把取走请求当成完成。 */
+    private void awaitBackgroundProgress(String operation) throws InterruptedIOException {
         files.beforeWait();
         try {
             changed.await();
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            InterruptedIOException error = new InterruptedIOException("Interrupted waiting for background flush");
+            InterruptedIOException error = new InterruptedIOException("Interrupted waiting for background " + operation);
             error.initCause(interrupted);
             throw error;
         }
-        if (state == State.FAILED) {
-            throw new IOException("LSM failed while waiting for background flush", failure);
-        }
-        requireOpen();
     }
 
     /** 包内编号预留，不创建文件；轮换/输出创建仍须使用 CREATE_NEW。 */
@@ -350,6 +387,10 @@ public final class LsmStore implements AutoCloseable {
             }
             if (state == State.OPEN) {
                 state = State.CLOSING;
+            }
+            if (manualCompaction != null && !manualCompaction.started) {
+                completeManualCompaction(manualCompaction,
+                        new IOException("LSM closed before manual compaction started"));
             }
             changed.signalAll();
         } finally {
@@ -434,11 +475,13 @@ public final class LsmStore implements AutoCloseable {
             while (true) {
                 Frozen job = null;
                 Compaction compaction = null;
+                ManualCompaction request = null;
                 long outputId;
                 List<MemTableRecord> snapshot = null;
                 lock.lock();
                 try {
-                    while (frozen == null && tables.size() < compactionThreshold && state == State.OPEN) {
+                    while (frozen == null && manualCompaction == null
+                            && tables.size() < compactionThreshold && state == State.OPEN) {
                         changed.awaitUninterruptibly();
                     }
                     if (state == State.FAILED || state == State.CLOSED) {
@@ -448,7 +491,16 @@ public final class LsmStore implements AutoCloseable {
                         job = frozen;
                         outputId = allocateFileIdLocked();
                         snapshot = job.memory().table.snapshot();
-                    } else if (state == State.OPEN && tables.size() >= compactionThreshold) {
+                    } else if (state == State.OPEN
+                            && (manualCompaction != null || tables.size() >= compactionThreshold)) {
+                        request = manualCompaction;
+                        if (request != null) {
+                            request.started = true;
+                        }
+                        if (tables.size() < 2) {
+                            completeManualCompaction(request, null);
+                            continue; // 无操作不预留编号、不创建文件。
+                        }
                         outputId = allocateFileIdLocked();
                         compaction = new Compaction(manifest.current().sstIds(), List.copyOf(tables), outputId);
                     } else {
@@ -461,6 +513,12 @@ public final class LsmStore implements AutoCloseable {
                     writeAndPublish(job, outputId, snapshot);
                 } else {
                     compactAndPublish(compaction);
+                    lock.lock();
+                    try {
+                        completeManualCompaction(request, state == State.FAILED ? failure : null);
+                    } finally {
+                        lock.unlock();
+                    }
                 }
             }
         } catch (IOException | RuntimeException | Error failure) {
@@ -658,7 +716,26 @@ public final class LsmStore implements AutoCloseable {
             backgroundFailure = cause;
         }
         state = State.FAILED;
+        completeManualCompaction(manualCompaction, failure);
         changed.signalAll();
+    }
+
+    /** 持锁调用；结果只写一次，成功须晚于发布及资源清理，所有等待者共享通知。 */
+    private void completeManualCompaction(ManualCompaction request, Throwable error) {
+        if (request != null && !request.done) {
+            request.error = error;
+            request.done = true;
+            if (manualCompaction == request) {
+                manualCompaction = null;
+            }
+            changed.signalAll();
+        }
+    }
+
+    private static final class ManualCompaction {
+        private boolean started;
+        private boolean done;
+        private Throwable error;
     }
 
     private record Frozen(MemoryTable memory, long walId) {

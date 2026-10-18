@@ -1,6 +1,6 @@
 # 阈值自动后台压缩
 
-本步把[多路归并](sstable-merge.md)和[Manifest 替换协议](manifest-compaction.md)接入 LsmStore，并完成自动阈值触发。用户要求本轮直接完成自动流程；同步手动 compact() 的请求登记与等待留在后续，本阶段尚未归档。
+本步把[多路归并](sstable-merge.md)和[Manifest 替换协议](manifest-compaction.md)接入 LsmStore，并完成自动阈值触发。自动与[同步手动 compact()](lsm-manual-compaction.md) 共用唯一工作线程，本阶段尚未归档。
 
 ## 配置与触发
 
@@ -24,7 +24,8 @@ try (LsmStore store = LsmStore.open(directory, 4L * 1024 * 1024, 4)) {
 ```text
 持锁检查：
   有 frozen                         → flush
-  否则 OPEN 且有效表数达到阈值         → 全量 compaction
+  否则 OPEN 且有手动请求              → 手动 compaction（少于两表无操作）
+  否则 OPEN 且有效表数达到阈值         → 自动全量 compaction
   OPEN 且没有工作                    → Condition 等待
   正在关闭且没有 frozen               → 退出
 ```
@@ -58,7 +59,7 @@ FileOps.writeCompaction 局部适配为单次 Iterable。hasNext 缓存一次推
 
 打开、读取、构建、关闭或提交失败会停止服务并唤醒背压等待者，后续操作和 close 报错。提交结果不确定时保留新旧文件，重开按有效 Manifest 恢复。若前台已失败，后台即使构建成功也不提交新状态。
 
-close 标记 CLOSING、唤醒并 join 工作线程；已开始任务安全结束，既有 frozen 仍可刷盘，但不再开始新自动任务。关闭可能留下达到阈值的有效表集，下次打开再触发。
+close 标记 CLOSING、唤醒并 join 工作线程；已开始任务安全结束，既有 frozen 仍可刷盘，但不再开始新自动任务；尚未开始的手动请求明确失败并唤醒调用方，已开始的手动请求完成后通知。关闭可能留下达到阈值的有效表集，下次打开再触发。
 
 ## 验证与限制
 
@@ -66,6 +67,6 @@ close 标记 CLOSING、唤醒并 join 工作线程；已开始任务安全结束
 
 另有 4 个独立 JVM 用例，Runtime.halt 跳过 finally/close：真实 Writer 写出大块但未完成文件、完整输出提交前、提交后、删除首个旧输入后。每例都在压缩期间先完成覆盖、删除、WAL 轮换与新 active 写入；父进程核对原始文件集和两份 WAL，重开校验三态、空键/值、二进制、大记录及续写。
 
-`./mvnw test` 与 `./mvnw clean verify` 均通过，共 604 个用例、0 失败；`openspec validate --all --strict --no-interactive` 通过。
+`./mvnw test` 与 `./mvnw clean verify` 均通过，包含手动压缩验证后共 619 个用例、0 失败；`openspec validate --all --strict --no-interactive` 通过。
 
 恢复先验证引用再清理孤儿；进程退出验证不等同断电实验。全量压缩有较高写放大，需要输入输出临时共存；单输出受既有 64 MiB 索引上限约束，超限明确失败，不自动拆表或回收 Tombstone。

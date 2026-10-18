@@ -1,6 +1,6 @@
 # SSTable 多路有序归并
 
-本步实现 SsTableMerger，用多个[可暂停游标](sstable-cursor.md)输出严格递增、每键唯一且保留最新状态的记录流。它还没有接入 LsmStore，不提交 Manifest，不发布或删除输入文件，也不提供自动/手动 compaction 调度。
+本步实现 SsTableMerger，用多个[可暂停游标](sstable-cursor.md)输出严格递增、每键唯一且保留最新状态的记录流。归并器本身不提交 Manifest 或删除输入；LsmStore 的[自动压缩](lsm-automatic-compaction.md)与[手动请求](lsm-manual-compaction.md)已复用它完成文件集发布。
 
 ## 接口与输入顺序
 
@@ -14,7 +14,7 @@ try (SsTableMerger merger = SsTableMerger.open(List.of(oldest, middle, newest)))
 }
 ```
 
-输入列表必须按旧到新排列，以后由 LsmStore 按固定的 Manifest 顺序提供。列表位置称为 generation，仅在这次归并内表达新旧，不是文件编号，也不写入记录格式。相同键取 generation 最大的一条。
+输入列表必须按旧到新排列，由 LsmStore 按固定的 Manifest 顺序提供。列表位置称为 generation，仅在这次归并内表达新旧，不是文件编号，也不写入记录格式。相同键取 generation 最大的一条。
 
 open 获取各 Reader 的独占游标，但不读数据块；第一次 next 才取得各输入头。next 返回 true 后 record 可重复读取，推进前、耗尽后、失败及关闭后都不能取当前位置。耗尽后的 next 仍返回 false。归并器和 Reader 都是单线程使用。
 
@@ -51,7 +51,7 @@ sources 为每路保存 generation、游标和头记录。heads 最小堆只保�
 
 即使某条旧记录已被新表覆盖，旧输入也必须推进。若它的下一块损坏，这次 next 仍失败，不能直接跳过该输入。为了完整处理同键组，归并器会预先把参与输入推进到下一条，所以错误可能在返回当前胜者前发生；已经返回的合法前缀不回滚，调用方不得把部分结果发布为成功输出。
 
-本步保持 checked IOException，没有把归并器实现为标准 Iterator。后续接入 Iterable Writer 时再做局部异常适配，并保留原始错误与清理异常。
+本步保持 checked IOException，没有把归并器实现为标准 Iterator。LsmStore 接入 Iterable Writer 时已在局部适配异常，并保留原始错误与清理异常。
 
 ## 成本与验证
 
@@ -61,4 +61,4 @@ sources 为每路保存 generation、游标和头记录。heads 最小堆只保�
 
 `./mvnw test` 和 `./mvnw clean verify` 均通过，共 560 个用例、0 失败；`openspec validate --all --strict --no-interactive` 通过。
 
-后续已实现 [Manifest 的受限替换转换](manifest-compaction.md)；后台任务、请求等待和文件回收仍待后续接入。
+后续已实现 [Manifest 的受限替换转换](manifest-compaction.md)；后台任务、请求等待和文件回收也已接入，见[自动压缩](lsm-automatic-compaction.md)及[手动请求](lsm-manual-compaction.md)。

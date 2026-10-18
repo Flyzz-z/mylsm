@@ -1,6 +1,6 @@
 # SSTable 可暂停游标
 
-这是 compaction 阶段的第一个实现小步。已确认的完整方案见 [设计](../openspec/changes/implement-compaction/design.md)，本步只新增逐块游标。后续已完成[多路有序归并](sstable-merge.md)，自动压缩、手动 compact 和 Manifest 压缩替换仍待后续实现。
+这是 compaction 阶段的第一个实现小步。已确认的完整方案见 [设计](../openspec/changes/implement-compaction/design.md)，本步只新增逐块游标。后续已完成[多路有序归并](sstable-merge.md)、[Manifest 替换](manifest-compaction.md)、[自动后台压缩](lsm-automatic-compaction.md)及[手动 compact](lsm-manual-compaction.md)。
 
 ## 为什么需要游标
 
@@ -57,4 +57,4 @@ next 保留 checked `IOException`。读取无进展、提前 EOF、CRC 错误、
 
 新增 17 个测试用例，验证空表和当前位置、创建无预读、块内推进无额外 I/O、跨块顺序、二进制与三态、不同输入交替推进、提前关闭、冲突操作与 scan 重入、CRC/内容/索引边界损坏、短读和无进展/EOF/异常、关闭失败及重复关闭。
 
-本步完成时 `./mvnw test` 与 `./mvnw clean verify` 均通过，共 544 个用例，0 失败；`openspec validate --all --strict --no-interactive` 通过。后续已使用多个游标实现[有序归并](sstable-merge.md)，按输入表在 Manifest 中的位置选择同键最新记录；后台调度与文件集替换仍留在后续步骤。
+本步完成时 `./mvnw test` 与 `./mvnw clean verify` 均通过，共 544 个用例，0 失败；`openspec validate --all --strict --no-interactive` 通过。后续已使用多个游标实现[有序归并](sstable-merge.md)，按输入表在 Manifest 中的位置选择同键最新记录；后台调度与文件集替换现已接入，见[自动压缩](lsm-automatic-compaction.md)及[手动请求](lsm-manual-compaction.md)。

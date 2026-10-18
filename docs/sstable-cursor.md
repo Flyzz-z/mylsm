@@ -1,6 +1,6 @@
 # SSTable 可暂停游标
 
-这是 compaction 阶段的第一个实现小步。已确认的完整方案见 [设计](../openspec/changes/implement-compaction/design.md)，本步只新增逐块游标。后续已完成[多路有序归并](sstable-merge.md)、[Manifest 替换](manifest-compaction.md)、[自动后台压缩](lsm-automatic-compaction.md)及[手动 compact](lsm-manual-compaction.md)。
+这是 compaction 阶段的第一个实现小步。已确认的完整方案见 [设计](../openspec/changes/archive/2026-10-18-implement-compaction/design.md)，本步只新增逐块游标。后续已完成[多路有序归并](sstable-merge.md)、[Manifest 替换](manifest-compaction.md)、[自动后台压缩](lsm-automatic-compaction.md)及[手动 compact](lsm-manual-compaction.md)。
 
 ## 为什么需要游标
 

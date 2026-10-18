@@ -95,4 +95,4 @@ Writer 的 Iterable 无 checked I/O：局部适配为 UncheckedIOException，在
 
 ## Migration Plan
 
-按已确认方案分步实现；已完成游标、多路归并、Manifest 替换以及后台构建、发布、回收、自动阈值触发、同步手动请求和独立进程退出恢复；最终阶段复盘仍待后续，见 docs/lsm-automatic-compaction.md 与 docs/lsm-manual-compaction.md。正式 specs 不提前修改，验收和学习复盘完成后再同步并归档，不推送。
+按已确认方案分步实现；已完成游标、多路归并、Manifest 替换以及后台构建、发布、回收、自动阈值触发、同步手动请求和独立进程退出恢复；阶段验收和学习复盘已完成，见 docs/compaction-review.md；已同步正式规范，本次收尾归档并提交，不推送。自动与手动细节见 docs/lsm-automatic-compaction.md 与 docs/lsm-manual-compaction.md。

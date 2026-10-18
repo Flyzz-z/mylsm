@@ -40,5 +40,5 @@
 
 - [x] 6.1 [AI 实现] 使用 @TempDir 和独立 JVM 验证部分输出、未发布完整输出、Manifest 提交后及旧文件部分回收后的退出恢复，并验证恢复后续写。
 - [x] 6.2 [助手支持] 执行 ./mvnw clean verify 与 openspec validate --all --strict --no-interactive，整理验收结果及已知限制。
-- [ ] 6.3 [共同设计] 复盘最新优先、Tombstone 保留、文件集提交与恢复不变量，记录用户反馈。
-- [ ] 6.4 [助手支持] 更新 README、路线和学习笔记，完成后同步正式 specs、归档本 change 并小步提交，不自动推送。
+- [x] 6.3 [共同设计] 复盘最新优先、Tombstone 保留、文件集提交与恢复不变量，记录用户反馈。
+- [x] 6.4 [助手支持] 更新 README、路线和学习笔记，完成后同步正式 specs、归档本 change 并小步提交，不自动推送。

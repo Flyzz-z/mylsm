@@ -1,6 +1,6 @@
 # 阈值自动后台压缩
 
-本步把[多路归并](sstable-merge.md)和[Manifest 替换协议](manifest-compaction.md)接入 LsmStore，并完成自动阈值触发。自动与[同步手动 compact()](lsm-manual-compaction.md) 共用唯一工作线程，本阶段尚未归档。
+本步把[多路归并](sstable-merge.md)和[Manifest 替换协议](manifest-compaction.md)接入 LsmStore，并完成自动阈值触发。自动与[同步手动 compact()](lsm-manual-compaction.md) 共用唯一工作线程，本阶段已完成[复盘与归档](compaction-review.md)。
 
 ## 配置与触发
 

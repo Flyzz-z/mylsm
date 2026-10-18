@@ -14,17 +14,19 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 
 import static java.nio.file.StandardOpenOption.READ;
 
-/** 单线程只读 SSTable；元信息在打开时验证，数据块按访问时验证，无跨操作块缓存。 */
+/** 支持并发点查的只读 SSTable；scan/游标独占，数据块按访问验证，无跨操作块缓存。 */
 public final class SsTableReader implements AutoCloseable {
     private enum State { OPEN, FAILED, CLOSED }
 
     private final ReadIo input;
     private final List<IndexEntry> index;
-    private State state = State.OPEN;
+    private final ReentrantReadWriteLock access = new ReentrantReadWriteLock(true);
+    private volatile State state = State.OPEN; // 并行 get 可单向标记 FAILED；关闭持写锁。
     private boolean scanning;
     private Cursor cursor;
 
@@ -80,27 +82,32 @@ public final class SsTableReader implements AutoCloseable {
      * @throws IOException 如果读取或块验证失败；此后仅允许 close
      */
     public Optional<Entry> get(ByteKey key) throws IOException {
-        requireAvailable();
-        Objects.requireNonNull(key, "key");
-        int blockIndex = findBlock(key);
-        if (blockIndex == index.size()) {
-            return Optional.empty();
-        }
+        access.readLock().lock();
         try {
-            List<SsTableRecord> records = readBlock(blockIndex);
-            for (SsTableRecord record : records) {
-                int comparison = record.key().compareTo(key);
-                if (comparison == 0) {
-                    return Optional.of(record.entry());
-                }
-                if (comparison > 0) {
-                    break;
-                }
+            requireAvailable();
+            Objects.requireNonNull(key, "key");
+            int blockIndex = findBlock(key);
+            if (blockIndex == index.size()) {
+                return Optional.empty();
             }
-            return Optional.empty();
-        } catch (IOException failure) {
-            state = State.FAILED;
-            throw failure;
+            try {
+                List<SsTableRecord> records = readBlock(blockIndex);
+                for (SsTableRecord record : records) {
+                    int comparison = record.key().compareTo(key);
+                    if (comparison == 0) {
+                        return Optional.of(record.entry());
+                    }
+                    if (comparison > 0) {
+                        break;
+                    }
+                }
+                return Optional.empty();
+            } catch (IOException failure) {
+                state = State.FAILED;
+                throw failure;
+            }
+        } finally {
+            access.readLock().unlock();
         }
     }
 
@@ -114,25 +121,30 @@ public final class SsTableReader implements AutoCloseable {
      * @throws IOException 如果读取或块验证失败；此后仅允许 close
      */
     public void scan(Consumer<SsTableRecord> consumer) throws IOException {
-        requireAvailable();
-        Objects.requireNonNull(consumer, "consumer");
-        scanning = true;
+        access.writeLock().lock();
         try {
-            for (int blockIndex = 0; blockIndex < index.size(); blockIndex++) {
-                List<SsTableRecord> records;
-                try {
-                    records = readBlock(blockIndex);
-                } catch (IOException failure) {
-                    state = State.FAILED;
-                    throw failure;
+            requireAvailable();
+            Objects.requireNonNull(consumer, "consumer");
+            scanning = true;
+            try {
+                for (int blockIndex = 0; blockIndex < index.size(); blockIndex++) {
+                    List<SsTableRecord> records;
+                    try {
+                        records = readBlock(blockIndex);
+                    } catch (IOException failure) {
+                        state = State.FAILED;
+                        throw failure;
+                    }
+                    // 回调放在读取错误的 catch 范围外，不能将回调失败误判为文件损坏。
+                    for (SsTableRecord record : records) {
+                        consumer.accept(record);
+                    }
                 }
-                // 回调放在读取错误的 catch 范围外，不能将回调失败误判为文件损坏。
-                for (SsTableRecord record : records) {
-                    consumer.accept(record);
-                }
+            } finally {
+                scanning = false;
             }
         } finally {
-            scanning = false;
+            access.writeLock().unlock();
         }
     }
 
@@ -143,9 +155,14 @@ public final class SsTableReader implements AutoCloseable {
      * @throws IllegalStateException 如果实例已关闭、已失败、正在 scan 或已有游标
      */
     public Cursor openCursor() {
-        requireAvailable();
-        cursor = new Cursor();
-        return cursor;
+        access.writeLock().lock();
+        try {
+            requireAvailable();
+            cursor = new Cursor();
+            return cursor;
+        } finally {
+            access.writeLock().unlock();
+        }
     }
 
     /** 单线程拉取游标，最多保留一个已验证数据块；不实现会隐藏 checked I/O 的 Iterator。 */
@@ -166,43 +183,58 @@ public final class SsTableReader implements AutoCloseable {
          * @throws IllegalStateException 如果游标已关闭或 Reader 已失效
          */
         public boolean next() throws IOException {
-            requireUsable();
-            if (recordIndex + 1 < records.size()) {
-                recordIndex++;
-                return true;
-            }
-            // 先清除旧位置和块引用，避免失败后暴露旧记录或在读下一块时持有两块。
-            clearPosition();
-            if (nextBlock == index.size()) {
-                return false;
-            }
+            access.writeLock().lock();
             try {
-                records = readBlock(nextBlock);
-                nextBlock++;
-                recordIndex = 0;
-                return true;
-            } catch (IOException failure) {
-                state = State.FAILED;
-                throw failure;
+                requireUsable();
+                if (recordIndex + 1 < records.size()) {
+                    recordIndex++;
+                    return true;
+                }
+                // 先清除旧位置和块引用，避免失败后暴露旧记录或在读下一块时持有两块。
+                clearPosition();
+                if (nextBlock == index.size()) {
+                    return false;
+                }
+                try {
+                    records = readBlock(nextBlock);
+                    nextBlock++;
+                    recordIndex = 0;
+                    return true;
+                } catch (IOException failure) {
+                    state = State.FAILED;
+                    throw failure;
+                }
+            } finally {
+                access.writeLock().unlock();
             }
         }
 
         /** 返回最近一次成功推进的不可变记录；重复读取不推进游标。 */
         public SsTableRecord record() {
-            requireUsable();
-            if (recordIndex < 0) {
-                throw new IllegalStateException("SSTable cursor has no current record");
+            access.writeLock().lock();
+            try {
+                requireUsable();
+                if (recordIndex < 0) {
+                    throw new IllegalStateException("SSTable cursor has no current record");
+                }
+                return records.get(recordIndex);
+            } finally {
+                access.writeLock().unlock();
             }
-            return records.get(recordIndex);
         }
 
         /** 释放当前位置、块缓冲及 Reader 占用，不关闭文件；重复关闭安全。 */
         @Override
         public void close() {
-            if (!closed) {
-                closed = true;
-                clearPosition();
-                cursor = null;
+            access.writeLock().lock();
+            try {
+                if (!closed) {
+                    closed = true;
+                    clearPosition();
+                    cursor = null;
+                }
+            } finally {
+                access.writeLock().unlock();
             }
         }
 
@@ -226,15 +258,20 @@ public final class SsTableReader implements AutoCloseable {
      */
     @Override
     public void close() throws IOException {
-        if (scanning) {
-            throw new IllegalStateException("Cannot close SSTable reader during scan");
-        }
-        if (state != State.CLOSED) {
-            state = State.CLOSED;
-            if (cursor != null) {
-                cursor.close();
+        access.writeLock().lock();
+        try {
+            if (scanning) {
+                throw new IllegalStateException("Cannot close SSTable reader during scan");
             }
-            input.close();
+            if (state != State.CLOSED) {
+                state = State.CLOSED;
+                if (cursor != null) {
+                    cursor.close();
+                }
+                input.close();
+            }
+        } finally {
+            access.writeLock().unlock();
         }
     }
 

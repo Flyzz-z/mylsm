@@ -1,6 +1,6 @@
 # 读写锁下的并发点查
 
-本步让多个线程共享同一个 LsmStore：get 可以同时读磁盘，写入、内存代轮换、Manifest 发布和生命周期变化持独占写锁。用户已确认先使用读写锁；锁外点查、文件集引用计数及 MVCC 留在未来单独讨论。当前 change 为 [support-concurrent-point-reads](../openspec/changes/support-concurrent-point-reads/design.md)，尚未做最终阶段复盘和归档。
+本步让多个线程共享同一个 LsmStore：get 可以同时读磁盘，写入、内存代轮换、Manifest 发布和生命周期变化持独占写锁。用户已确认先使用读写锁；锁外点查、文件集引用计数及 MVCC 留在未来单独讨论。阶段归档为 [support-concurrent-point-reads](../openspec/changes/archive/2026-10-18-support-concurrent-point-reads/design.md)，已完成[阶段复盘](concurrency-review.md)及正式规范同步。
 
 ## 两层锁分别保护什么
 

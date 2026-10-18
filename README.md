@@ -8,7 +8,7 @@
 
 阶段 5 已完成复盘与归档：支持 [SSTable 可暂停游标](docs/sstable-cursor.md)、[多路有序归并](docs/sstable-merge.md)、[Manifest 压缩替换](docs/manifest-compaction.md)和[阈值自动后台压缩](docs/lsm-automatic-compaction.md)。默认有效 SSTable 达到 4 张后，由唯一后台线程全量合并为一张，保留最新 Value/Tombstone；可用 `open(directory, memTableTargetBytes, compactionThreshold)` 配置阈值（至少 2）。支持期间前台串行读写、WAL 轮换、发布后回收及进程退出恢复。`flush()` 只等待刷盘；[同步手动 `compact()`](docs/lsm-manual-compaction.md) 会先 flush，再等待后台压缩实际完成。见[阶段复盘](docs/compaction-review.md)、正式规范 [lsm-compaction](openspec/specs/lsm-compaction/spec.md) 及[归档设计](openspec/changes/archive/2026-10-18-implement-compaction/design.md)和[任务](openspec/changes/archive/2026-10-18-implement-compaction/tasks.md)。
 
-已接入[读写锁并发点查](docs/concurrent-point-reads.md)：多个线程可共享一个 LsmStore，get 并行执行，Reader 以[独立读 context](docs/sstable-read-context.md)支持多个游标与扫描，写入和发布串行；flush 固定目标代，compact 和 close 协调并发等待者。慢查询仍会阻塞写入与发布。该独立阶段的[设计](openspec/changes/support-concurrent-point-reads/design.md)和[任务](openspec/changes/support-concurrent-point-reads/tasks.md)尚待最终复盘归档，当前仍要求单实例独占目录。
+已接入[读写锁并发点查](docs/concurrent-point-reads.md)：多个线程可共享一个 LsmStore，get 并行执行，Reader 以[独立读 context](docs/sstable-read-context.md)支持多个游标与扫描，写入和发布串行；flush 固定目标代，compact 和 close 协调并发等待者。慢查询仍会阻塞写入与发布。该独立阶段已完成[复盘](docs/concurrency-review.md)与归档，正式规范见 [lsm-store](openspec/specs/lsm-store/spec.md) 和 [sstable](openspec/specs/sstable/spec.md)，阶段记录见[设计](openspec/changes/archive/2026-10-18-support-concurrent-point-reads/design.md)和[任务](openspec/changes/archive/2026-10-18-support-concurrent-point-reads/tasks.md)；当前仍要求单实例独占目录。
 
 ## 环境与构建
 
@@ -67,6 +67,6 @@ openspec archive add-memtable-iteration
 
 ## Git 与学习路线
 
-默认分支为 `main`，每阶段使用独立主题分支、小步提交。忽略构建产物、IDE 配置与 `data/` 运行数据；本轮不配置远端或推送。
+默认分支为 `main`，每阶段使用独立主题分支、小步提交。忽略构建产物、IDE 配置与 `data/` 运行数据；推送及目标分支由用户明确指定。
 
 见 [学习路线](docs/roadmap.md) 和 [协作约定](AGENTS.md)。已完成的基础模型见 [ByteKey 学习笔记](docs/byte-key.md) 和 [记录模型学习笔记](docs/entry-model.md)。内存表实现见 [MemTable 学习笔记](docs/memtable.md)。有序遍历及阶段复盘见 [快照学习笔记](docs/memtable-snapshot.md)。当前 WAL 见 [编解码学习笔记](docs/wal-codec.md)、[文件写入笔记](docs/wal-writer.md)、[恢复笔记](docs/wal-recovery.md) 和 [存储组合笔记](docs/wal-store.md)。WalStore 单线程独占日志，成功写入依赖平台正确实现文件同步，不保证新建文件父目录项的断电持久性；未正常关闭的进程退出测试不等同于断电实验。

@@ -25,8 +25,8 @@ public final class SsTableReader implements AutoCloseable {
 
     private final ReadIo input;
     private final List<IndexEntry> index;
-    private final ReentrantReadWriteLock access = new ReentrantReadWriteLock(true);
-    private volatile State state = State.OPEN; // 并行 get 可单向标记 FAILED；关闭持写锁。
+    private final ReentrantReadWriteLock lifecycleLock = new ReentrantReadWriteLock(true);
+    private volatile State state = State.OPEN; // 并行读取可单向标记 FAILED；关闭持写锁。
 
     private SsTableReader(ReadIo input, List<IndexEntry> index) {
         this.input = input;
@@ -80,7 +80,7 @@ public final class SsTableReader implements AutoCloseable {
      * @throws IOException 如果读取或块验证失败；此后仅允许 close
      */
     public Optional<Entry> get(ByteKey key) throws IOException {
-        access.readLock().lock();
+        lifecycleLock.readLock().lock();
         try {
             requireOpen();
             Objects.requireNonNull(key, "key");
@@ -105,7 +105,7 @@ public final class SsTableReader implements AutoCloseable {
                 throw failure;
             }
         } finally {
-            access.readLock().unlock();
+            lifecycleLock.readLock().unlock();
         }
     }
 
@@ -136,12 +136,12 @@ public final class SsTableReader implements AutoCloseable {
      * @throws IllegalStateException 如果实例已关闭或已失败
      */
     public Cursor openCursor() {
-        access.readLock().lock();
+        lifecycleLock.readLock().lock();
         try {
             requireOpen();
             return new Cursor();
         } finally {
-            access.readLock().unlock();
+            lifecycleLock.readLock().unlock();
         }
     }
 
@@ -163,7 +163,7 @@ public final class SsTableReader implements AutoCloseable {
          * @throws IllegalStateException 如果游标已关闭或 Reader 已失效
          */
         public boolean next() throws IOException {
-            access.readLock().lock();
+            lifecycleLock.readLock().lock();
             try {
                 requireUsable();
                 if (recordIndex + 1 < records.size()) {
@@ -185,13 +185,13 @@ public final class SsTableReader implements AutoCloseable {
                     throw failure;
                 }
             } finally {
-                access.readLock().unlock();
+                lifecycleLock.readLock().unlock();
             }
         }
 
         /** 返回最近一次成功推进的不可变记录；重复读取不推进游标。 */
         public SsTableRecord record() {
-            access.readLock().lock();
+            lifecycleLock.readLock().lock();
             try {
                 requireUsable();
                 if (recordIndex < 0) {
@@ -199,7 +199,7 @@ public final class SsTableReader implements AutoCloseable {
                 }
                 return records.get(recordIndex);
             } finally {
-                access.readLock().unlock();
+                lifecycleLock.readLock().unlock();
             }
         }
 
@@ -232,14 +232,14 @@ public final class SsTableReader implements AutoCloseable {
      */
     @Override
     public void close() throws IOException {
-        access.writeLock().lock();
+        lifecycleLock.writeLock().lock();
         try {
             if (state != State.CLOSED) {
                 state = State.CLOSED;
                 input.close();
             }
         } finally {
-            access.writeLock().unlock();
+            lifecycleLock.writeLock().unlock();
         }
     }
 

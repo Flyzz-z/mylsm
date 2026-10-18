@@ -52,10 +52,10 @@ public final class LsmStore implements AutoCloseable {
     private final ManifestFile manifest;
     private final long targetBytes;
     private final int compactionThreshold;
-    private final ReentrantReadWriteLock access = new ReentrantReadWriteLock(true);
-    private final Lock lock = access.writeLock();
-    private final Lock readLock = access.readLock();
-    private final Condition changed = lock.newCondition();
+    private final ReentrantReadWriteLock stateLock = new ReentrantReadWriteLock(true);
+    private final Lock writeLock = stateLock.writeLock();
+    private final Lock readLock = stateLock.readLock();
+    private final Condition changed = writeLock.newCondition();
     private WalWriter writer;
     private MemoryTable active;
     private Frozen frozen;
@@ -189,23 +189,23 @@ public final class LsmStore implements AutoCloseable {
 
     /** 完整追加并同步 WAL 后更新活跃表；必要时轮换或在追加前等待冻结槽位。 */
     public void put(ByteKey key, Value value) throws IOException {
-        lock.lock();
+        writeLock.lock();
         try {
             requireOpen();
             appendAndApply(new WalRecord(key, value));
         } finally {
-            lock.unlock();
+            writeLock.unlock();
         }
     }
 
     /** 保存删除标记，包含当前不存在的键。 */
     public void delete(ByteKey key) throws IOException {
-        lock.lock();
+        writeLock.lock();
         try {
             requireOpen();
             appendAndApply(new WalRecord(key, Tombstone.INSTANCE));
         } finally {
-            lock.unlock();
+            writeLock.unlock();
         }
     }
 
@@ -227,13 +227,13 @@ public final class LsmStore implements AutoCloseable {
         }
         if (readFailure != null) {
             // 读锁不能升级成写锁；先退出读取，再独占登记失败并唤醒等待者。
-            lock.lock();
+            writeLock.lock();
             try {
                 if (state != State.CLOSED) {
                     fail(readFailure, false);
                 }
             } finally {
-                lock.unlock();
+                writeLock.unlock();
             }
             throwIfFailed(readFailure);
         }
@@ -246,7 +246,7 @@ public final class LsmStore implements AutoCloseable {
      * 后台失败抛 IOException；等待中断保留标志且不取消已开始的刷盘。
      */
     public void flush() throws IOException {
-        lock.lock();
+        writeLock.lock();
         try {
             requireOpen();
             MemoryTable target = active.bytes != 0 ? active : frozen == null ? null : frozen.memory();
@@ -259,7 +259,7 @@ public final class LsmStore implements AutoCloseable {
                 }
             }
         } finally {
-            lock.unlock();
+            writeLock.unlock();
         }
     }
 
@@ -270,7 +270,7 @@ public final class LsmStore implements AutoCloseable {
      */
     public void compact() throws IOException {
         flush();
-        lock.lock();
+        writeLock.lock();
         try {
             requireOpen();
             while (manualCompaction != null) {
@@ -286,7 +286,7 @@ public final class LsmStore implements AutoCloseable {
                 throw new IOException("Manual compaction failed", request.error);
             }
         } finally {
-            lock.unlock();
+            writeLock.unlock();
         }
     }
 
@@ -360,12 +360,12 @@ public final class LsmStore implements AutoCloseable {
 
     /** 包内编号预留，不创建文件；轮换/输出创建仍须使用 CREATE_NEW。 */
     long allocateFileId() throws IOException {
-        lock.lock();
+        writeLock.lock();
         try {
             requireOpen();
             return allocateFileIdLocked();
         } finally {
-            lock.unlock();
+            writeLock.unlock();
         }
     }
 
@@ -377,29 +377,29 @@ public final class LsmStore implements AutoCloseable {
     }
 
     long activeBytes() {
-        lock.lock();
+        writeLock.lock();
         try {
             requireOpen();
             return active.bytes;
         } finally {
-            lock.unlock();
+            writeLock.unlock();
         }
     }
 
     long frozenBytes() {
-        lock.lock();
+        writeLock.lock();
         try {
             requireOpen();
             return frozen == null ? 0 : frozen.memory().bytes;
         } finally {
-            lock.unlock();
+            writeLock.unlock();
         }
     }
 
     /** 等待已启动后台任务结束后释放资源；不强刷剩余活跃表。等待中断延后恢复标志。 */
     @Override
     public void close() throws IOException {
-        lock.lock();
+        writeLock.lock();
         try {
             if (state == State.CLOSED) {
                 return;
@@ -422,7 +422,7 @@ public final class LsmStore implements AutoCloseable {
             }
             changed.signalAll();
         } finally {
-            lock.unlock();
+            writeLock.unlock();
         }
         boolean interrupted = false;
         while (worker.isAlive()) {
@@ -433,7 +433,7 @@ public final class LsmStore implements AutoCloseable {
             }
         }
         Throwable failure;
-        lock.lock();
+        writeLock.lock();
         try {
             failure = backgroundFailure == null ? null
                     : new IOException("Background SSTable work failed", backgroundFailure);
@@ -443,7 +443,7 @@ public final class LsmStore implements AutoCloseable {
             state = State.CLOSED;
             changed.signalAll();
         } finally {
-            lock.unlock();
+            writeLock.unlock();
             if (interrupted) {
                 Thread.currentThread().interrupt();
             }
@@ -508,7 +508,7 @@ public final class LsmStore implements AutoCloseable {
                 ManualCompaction request = null;
                 long outputId;
                 List<MemTableRecord> snapshot = null;
-                lock.lock();
+                writeLock.lock();
                 try {
                     while (frozen == null && manualCompaction == null
                             && tables.size() < compactionThreshold && state == State.OPEN) {
@@ -537,26 +537,26 @@ public final class LsmStore implements AutoCloseable {
                         return; // CLOSING 时不再开始新的自动压缩。
                     }
                 } finally {
-                    lock.unlock();
+                    writeLock.unlock();
                 }
                 if (job != null) {
                     writeAndPublish(job, outputId, snapshot);
                 } else {
                     compactAndPublish(compaction);
-                    lock.lock();
+                    writeLock.lock();
                     try {
                         completeManualCompaction(request, state == State.FAILED ? failure : null);
                     } finally {
-                        lock.unlock();
+                        writeLock.unlock();
                     }
                 }
             }
         } catch (IOException | RuntimeException | Error failure) {
-            lock.lock();
+            writeLock.lock();
             try {
                 fail(failure, true);
             } finally {
-                lock.unlock();
+                writeLock.unlock();
             }
         }
     }
@@ -576,7 +576,7 @@ public final class LsmStore implements AutoCloseable {
             inputs.clear(); // 关闭失败的仍由 owned 保留；finally 不重复调用关闭钩子。
             throwIfFailed(inputCloseFailure);
             reader = registerTable(files.openTable(output));
-            lock.lock();
+            writeLock.lock();
             try {
                 if (state == State.FAILED || state == State.CLOSED) {
                     return; // 前台已失败，不提交新状态，保留输入和输出文件。
@@ -594,7 +594,7 @@ public final class LsmStore implements AutoCloseable {
                 reader = null; // 输出已登记在 owned 中；提交后仅安装预构建引用。
                 changed.signalAll();
             } finally {
-                lock.unlock();
+                writeLock.unlock();
             }
             throwIfFailed(closeTablesAndRelease(job.readers(), null));
             for (long id : job.ids()) {
@@ -620,7 +620,7 @@ public final class LsmStore implements AutoCloseable {
 
     /** 临时 Reader 也登记最终释放路径，关闭与前台资源列表修改均通过同一把锁协调。 */
     private SsTableReader registerTable(SsTableReader reader) {
-        lock.lock();
+        writeLock.lock();
         try {
             try {
                 owned.add(reader);
@@ -630,7 +630,7 @@ public final class LsmStore implements AutoCloseable {
             }
             return reader;
         } finally {
-            lock.unlock();
+            writeLock.unlock();
         }
     }
 
@@ -652,11 +652,11 @@ public final class LsmStore implements AutoCloseable {
                 }
             }
         }
-        lock.lock();
+        writeLock.lock();
         try {
             owned.removeIf(closed::contains);
         } finally {
-            lock.unlock();
+            writeLock.unlock();
         }
         return failure;
     }
@@ -686,7 +686,7 @@ public final class LsmStore implements AutoCloseable {
         try {
             files.writeTable(output, records);
             reader = files.openTable(output);
-            lock.lock();
+            writeLock.lock();
             try {
                 if (state == State.FAILED || state == State.CLOSED) {
                     return; // 其他路径已失败：保留 WAL，不再提交新状态。
@@ -711,7 +711,7 @@ public final class LsmStore implements AutoCloseable {
                 frozen = null;
                 changed.signalAll();
             } finally {
-                lock.unlock();
+                writeLock.unlock();
             }
             try {
                 files.deleteObsolete(walPath(directory, job.walId()));
@@ -738,7 +738,7 @@ public final class LsmStore implements AutoCloseable {
         }
     }
 
-    /** 所有调用者都持有 lock；先保存错误，再唤醒前台及工作线程。 */
+    /** 所有调用者都持有写锁；先保存错误，再唤醒前台及工作线程。 */
     private void fail(Throwable cause, boolean background) {
         if (failure == null) {
             failure = cause;

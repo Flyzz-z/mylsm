@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static java.nio.file.StandardOpenOption.READ;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -243,7 +244,7 @@ class SsTableConcurrentReadTest {
             assertFalse(scanning.isDone());
             callbackRelease.countDown();
             var error = assertThrows(ExecutionException.class, () -> scanning.get(5, TimeUnit.SECONDS));
-            org.junit.jupiter.api.Assertions.assertInstanceOf(IllegalStateException.class, error.getCause());
+            assertInstanceOf(IllegalStateException.class, error.getCause());
         } finally {
             callbackRelease.countDown();
             reader.close();

@@ -1,6 +1,6 @@
 # SSTable 可暂停游标
 
-这是 compaction 阶段的第一个实现小步。已确认的完整方案见 [设计](../openspec/changes/archive/2026-10-18-implement-compaction/design.md)，本步只新增逐块游标。后续已完成[多路有序归并](sstable-merge.md)、[Manifest 替换](manifest-compaction.md)、[自动后台压缩](lsm-automatic-compaction.md)及[手动 compact](lsm-manual-compaction.md)。
+这是 compaction 阶段的第一个实现小步。已确认的完整方案见 [设计](../openspec/changes/archive/2026-10-18-implement-compaction/design.md)，本步最初新增逐块游标，当前已按[独立读 context](sstable-read-context.md)支持同一 Reader 上的多个读取进度。后续已完成[多路有序归并](sstable-merge.md)、[Manifest 替换](manifest-compaction.md)、[自动后台压缩](lsm-automatic-compaction.md)及[手动 compact](lsm-manual-compaction.md)。
 
 ## 为什么需要游标
 
@@ -20,10 +20,10 @@ try (SsTableReader reader = SsTableReader.open(path);
 }
 ```
 
-- `openCursor()` 不读数据块，只建立独占遍历状态。
+- `openCursor()` 不读数据块，只建立本次读取的独立遍历状态。
 - `next()` 返回 true 才具有当前位置；返回 false 表示正常耗尽，可重复返回 false。
 - `record()` 不推进，可以重复读取同一条不可变记录；第一次 next 之前、耗尽之后或关闭后调用都被拒绝。
-- 正常耗尽仍保留 Reader 占用，必须显式关闭。`try-with-resources` 会先关闭游标、再关闭 Reader。
+- 正常耗尽仍须显式关闭以释放本 context 的局部状态，不占用其他读取。`try-with-resources` 会先关闭游标、再关闭 Reader。
 
 SSTable 中每个块非空且键严格递增；块最大键和前一块边界也要匹配索引。游标复用现有 `readBlock`，不新增另一套格式校验逻辑。
 
@@ -39,11 +39,11 @@ SSTable 中每个块非空且键严格递增；块最大键和前一块边界也
 
 ## Reader 与游标的所有权
 
-Reader 仍是单线程对象，不因为增加游标而支持并发访问。同一 Reader 至多一个活跃游标，期间 get、scan 和另建游标都会失败；scan 回调也不能重入创建游标。冲突操作只被拒绝，不使正常 Reader 失效。
+Reader 共享文件资源和不可变索引，不保存唯一当前游标。同一 Reader 可以有多个独立 Cursor，允许 get、scan 和其他游标交错或并行；每个 Cursor 只由一个调用线程使用。scan 复用独立 Cursor，回调在 Reader 锁外执行，允许发起其他独立读取。
 
-关闭游标只清除当前记录、块缓冲和 Reader 占用，不关闭文件。随后可以点查、scan 或从头创建新游标；重复关闭旧游标不会释放后来创建的新游标。
+关闭游标只清除其当前记录和块缓冲，不关闭文件、不改变其他游标。重复关闭旧游标不影响其他 context。
 
-关闭 Reader 会先使现有游标失效，再关闭文件；即使文件关闭报错，Reader 与游标也不能继续读。重复关闭不会重复释放底层资源。未来后台 compaction 会独立打开输入 Reader，前台继续使用已有 Reader，本步不引入共享 Reader 的锁。
+Reader 的 get/openCursor/next/record 使用共享生命周期读锁，关闭持独占写锁等待当前读取退出；关闭后全部已有 context 不能继续 next/record，包括文件关闭报错时。暂停的 context 不阻止 Reader 关闭，其局部缓冲由各自 close 释放；不使用全局 context 注册表或引用计数。后台 compaction 仍独立打开输入 Reader，前台继续使用已有 Reader。
 
 ## 错误不等于结束
 
@@ -55,6 +55,8 @@ next 保留 checked `IOException`。读取无进展、提前 EOF、CRC 错误、
 
 ## 验证与后续
 
-新增 17 个测试用例，验证空表和当前位置、创建无预读、块内推进无额外 I/O、跨块顺序、二进制与三态、不同输入交替推进、提前关闭、冲突操作与 scan 重入、CRC/内容/索引边界损坏、短读和无进展/EOF/异常、关闭失败及重复关闭。
+最初新增 17 个测试用例，验证空表和当前位置、创建无预读、块内推进无额外 I/O、跨块顺序、二进制与三态、不同输入交替推进、提前关闭、冲突操作与 scan 重入、CRC/内容/索引边界损坏、短读和无进展/EOF/异常、关闭失败及重复关闭。
 
 本步完成时 `./mvnw test` 与 `./mvnw clean verify` 均通过，共 544 个用例，0 失败；`openspec validate --all --strict --no-interactive` 通过。后续已使用多个游标实现[有序归并](sstable-merge.md)，按输入表在 Manifest 中的位置选择同键最新记录；后台调度与文件集替换现已接入，见[自动压缩](lsm-automatic-compaction.md)及[手动请求](lsm-manual-compaction.md)。
+
+后续独立 context 调整了原有占用及重入契约，增加并行读取、共享失败和关闭验证，当前行为见[读 context 笔记](sstable-read-context.md)。

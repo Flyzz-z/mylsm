@@ -4,13 +4,14 @@ import io.github.flyzz.mylsm.model.ByteKey;
 
 import java.io.IOException;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.PriorityQueue;
 
 /**
  * 单线程流式归并，输入 Reader 按从旧到新排列，同键仅保留最新记录（含 Tombstone）。
- * 借用 Reader 并独占其游标；调用方不得在归并期间操作或关闭输入 Reader。
+ * 借用 Reader，拥有本次创建的独立游标；允许其他读取，但调用方不得在归并期间关闭输入 Reader。
  */
 public final class SsTableMerger implements AutoCloseable {
     private enum State { OPEN, FAILED, CLOSED }
@@ -28,15 +29,18 @@ public final class SsTableMerger implements AutoCloseable {
     }
 
     /**
-     * 获取每个 Reader 的独占游标，但不读取数据块；输入可为空或包含空表。
+     * 获取每个 Reader 的独立游标，但不读取数据块；输入可为空或包含空表。
      * 失败会释放本次已取得的游标，不关闭 Reader，也不释放调用方原有的游标。
      *
      * @throws NullPointerException 如果列表或其中的 Reader 为 null
      * @throws IllegalStateException 如果输入 Reader 不可用，或相同 Reader 被重复传入
      */
     public static SsTableMerger open(List<SsTableReader> oldestToNewest) {
-        // 先完整检查并复制参数，不能因后面的 null 而取得前面的 Reader 占用。
+        // 先完整检查并复制参数；重复输入仍拒绝，不依赖 Reader 的游标占用来校验。
         List<SsTableReader> readers = List.copyOf(Objects.requireNonNull(oldestToNewest, "oldestToNewest"));
+        if (new HashSet<>(readers).size() != readers.size()) {
+            throw new IllegalStateException("Duplicate input Reader");
+        }
         SsTableMerger merger = new SsTableMerger(readers.size());
         try {
             for (int i = 0; i < readers.size(); i++) {

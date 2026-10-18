@@ -126,7 +126,7 @@ class SsTableMergerTest {
             assertFalse(merger.next());
             assertFalse(merger.next());
             assertThrows(IllegalStateException.class, merger::record);
-            assertThrows(IllegalStateException.class, () -> reader.get(key(1)));
+            assertEquals(Optional.of(value(1, 2).entry()), reader.get(key(1)));
         }
     }
 
@@ -201,7 +201,9 @@ class SsTableMergerTest {
             assertEquals(Optional.of(value(2, 2).entry()), reader.get(key(2)));
             try (SsTableReader.Cursor replacement = reader.openCursor()) {
                 merger.close();
-                assertThrows(IllegalStateException.class, reader::openCursor);
+                try (var independent = reader.openCursor()) {
+                    assertTrue(independent.next());
+                }
                 assertTrue(replacement.next());
                 assertEquals(value(1, 1), replacement.record());
             }
@@ -210,14 +212,15 @@ class SsTableMergerTest {
     }
 
     @Test
-    void failedAcquisitionReleasesEarlierCursorsAndPreservesTheCallersOccupiedCursor() throws IOException {
+    void failedAcquisitionReleasesOnlyOwnedContextsAndPreservesTheCallersIndependentCursor() throws IOException {
         try (SsTableReader first = SsTableReader.open(table(List.of(value(1, 1))));
-             SsTableReader occupied = SsTableReader.open(table(List.of(value(2, 2))));
-             SsTableReader.Cursor ownedByCaller = occupied.openCursor()) {
-            assertThrows(IllegalStateException.class, () -> SsTableMerger.open(List.of(first, occupied)));
+             SsTableReader closed = SsTableReader.open(table(List.of(value(2, 2))));
+             SsTableReader.Cursor ownedByCaller = first.openCursor()) {
+            closed.close();
+            assertThrows(IllegalStateException.class, () -> SsTableMerger.open(List.of(first, closed)));
             assertEquals(Optional.of(value(1, 1).entry()), first.get(key(1)));
             assertTrue(ownedByCaller.next());
-            assertEquals(value(2, 2), ownedByCaller.record());
+            assertEquals(value(1, 1), ownedByCaller.record());
         }
     }
 
@@ -226,6 +229,22 @@ class SsTableMergerTest {
         try (SsTableReader reader = SsTableReader.open(table(List.of(value(1, 1))))) {
             assertThrows(IllegalStateException.class, () -> SsTableMerger.open(List.of(reader, reader)));
             assertEquals(Optional.of(value(1, 1).entry()), reader.get(key(1)));
+        }
+    }
+
+    @Test
+    void mergeOwnsItsContextsWithoutAffectingTheCallersPausedCursor() throws IOException {
+        List<SsTableRecord> records = List.of(value(1, 1), value(2, 2));
+        try (SsTableReader reader = SsTableReader.open(table(records));
+             var paused = reader.openCursor()) {
+            assertTrue(paused.next());
+            try (var merger = SsTableMerger.open(List.of(reader))) {
+                assertEquals(records, collect(merger));
+                assertEquals(Optional.of(value(2, 2).entry()), reader.get(key(2)));
+            }
+            assertEquals(value(1, 1), paused.record());
+            assertTrue(paused.next());
+            assertEquals(value(2, 2), paused.record());
         }
     }
 

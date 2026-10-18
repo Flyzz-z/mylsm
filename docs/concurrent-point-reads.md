@@ -7,7 +7,7 @@
 | 对象 | 共享读锁 | 独占写锁 |
 | --- | --- | --- |
 | LsmStore | get 全程，包括查询 active、frozen 及全部候选 SST | WAL 追加和同步、内存修改、轮换、文件发布、状态及资源列表变化 |
-| SsTableReader | get：索引定位、独立块缓冲、指定偏移读取和校验 | scan、创建游标、游标每次操作、关闭 |
+| SsTableReader | get、openCursor、Cursor.next/record，读取进度由独立 context 维护 | 关闭共享文件资源 |
 
 采用公平 ReentrantReadWriteLock，避免持续新读者越过排队写者；不承诺线程调度时间上界。调用顺序为 store → reader，Reader 不回调 store。内存表和 WAL 独立类依然按原约定由外部串行保护。
 
@@ -26,7 +26,7 @@
 
 FileChannel.read(buffer, offset) 不修改共享文件位置，每次 get 的缓冲和解析结果是局部变量，索引和字节键值不可变。get 之间只可能共同修改文件错误状态：state 为 volatile，读取持共享锁时只能从 OPEN 单向写入 FAILED；关闭持独占锁，等 get 全部退出后才变为 CLOSED 并释放文件，所以 FAILED 不会覆盖已完成的关闭。
 
-scan 在写锁内完整执行，回调重入仍由 scanning 拒绝。游标每次操作持写锁，但游标跨调用的占用仍由 cursor 标志表达：即使游标已耗尽，也必须显式关闭后才能 get/scan。游标仍由一个调用线程推进，不提供跨线程多消费者迭代接口。
+用户进一步选择[独立读 context](sstable-read-context.md)：Reader 不保存 scanning 或唯一 cursor，scan 复用自己的 Cursor。next/record 持共享读锁，不同 context 可以并行；Cursor.close 只清理局部缓冲，不取得 Reader 锁。scan 回调在锁外执行，可点查或创建其他游标；Reader.close 等当前读操作退出，使暂停游标的后续操作失败。每个游标仍由一个调用线程推进。
 
 ## flush 等待目标，不等待全局变空
 
@@ -56,8 +56,8 @@ get 出错时还持读锁，而 fail 需要修改存储状态并通知 Condition
 
 ## 验证与限制
 
-新增 13 个用例：Reader 两个不同块的底层读取真实重叠、并发失败与关闭、游标占用；store 多读重叠、写入/发布/关闭等待、读失败无升级死锁、120 次并发写入与查询/flush/compact 交错后按实际 WAL 顺序核对并重开、多手动请求、两次 flush 等待目标且更新冻结代仍阻塞、并发关闭的共享错误结果和中断保留。所有文件位于 @TempDir，关键交错使用锁存器及有上限的等待控制。
+读写锁初版新增 13 个用例：Reader 两个不同块的底层读取真实重叠、并发失败与关闭、暂停游标与点查；store 多读重叠、写入/发布/关闭等待、读失败无升级死锁、120 次并发写入与查询/flush/compact 交错后按实际 WAL 顺序核对并重开、多手动请求、两次 flush 等待目标且更新冻结代仍阻塞、并发关闭的共享错误结果和中断保留。所有文件位于 @TempDir，关键交错使用锁存器及有上限的等待控制。
 
-本步 ./mvnw test 与 ./mvnw clean verify 通过 632 个测试，0 失败、0 错误；严格 OpenSpec 校验通过。既有独立 JVM 退出恢复测试继续通过，文件格式未变。
+后续独立 context 又新增 6 个用例并调整旧占用契约，详见[读 context 笔记](sstable-read-context.md)。当前 ./mvnw test 与 ./mvnw clean verify 通过 638 个测试，0 失败、0 错误；严格 OpenSpec 校验通过。既有独立 JVM 退出恢复测试继续通过，文件格式未变。
 
 这是并行读、串行写的方案：慢磁盘查询仍会延迟 WAL 写入、文件发布及关闭；WAL 同步也会阻塞新查询。测试证明允许的交错及正确性，没有声称性能收益或吞吐上界。目录仍须单实例独占，没有新增跨进程锁或断电一致性保证。

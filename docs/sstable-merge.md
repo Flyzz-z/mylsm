@@ -16,7 +16,7 @@ try (SsTableMerger merger = SsTableMerger.open(List.of(oldest, middle, newest)))
 
 输入列表必须按旧到新排列，由 LsmStore 按固定的 Manifest 顺序提供。列表位置称为 generation，仅在这次归并内表达新旧，不是文件编号，也不写入记录格式。相同键取 generation 最大的一条。
 
-open 获取各 Reader 的独占游标，但不读数据块；第一次 next 才取得各输入头。next 返回 true 后 record 可重复读取，推进前、耗尽后、失败及关闭后都不能取当前位置。耗尽后的 next 仍返回 false。归并器和 Reader 都是单线程使用。
+open 获取各 Reader 的独立游标，但不读数据块；第一次 next 才取得各输入头。next 返回 true 后 record 可重复读取，推进前、耗尽后、失败及关闭后都不能取当前位置。耗尽后的 next 仍返回 false。归并器及各自游标由单一调用线程使用，Reader 可同时服务其他独立 context。
 
 ## 最小堆维护什么
 
@@ -43,9 +43,9 @@ sources 为每路保存 generation、游标和头记录。heads 最小堆只保�
 
 ## 错误与资源所有权
 
-归并器拥有自己创建的游标，但借用输入 Reader。关闭归并器释放全部游标、头和 current，不关闭 Reader。调用方随后可以点查、scan 或建立新游标，最后负责关闭 Reader。归并期间不要操作或关闭这些输入 Reader。
+归并器拥有自己创建的游标，但借用输入 Reader。关闭归并器释放全部游标、头和 current，不关闭 Reader。调用方可以在归并期间点查、scan 或维护其他独立游标，最后负责关闭 Reader；归并期间不得关闭这些输入 Reader。
 
-获取中途遇到已占用、已失效或重复 Reader，会释放此前本次获得的游标；调用者原本持有的游标不被释放。null 列表或元素先完整校验，不会因末尾 null 而取得前面 Reader 的占用。
+参数先完整校验 null 及重复 Reader，重复输入显式拒绝。获取中途遇到已关闭或失效 Reader，会释放此前本次获得的游标；调用者原本持有的独立游标不被释放。
 
 推进发生 IOException 时直接传播原错误，使归并器失效并释放所有自有游标，不再返回旧 current；健康 Reader 可再次使用，发生文件错误的 Reader 仍遵守已有 FAILED 契约。正常耗尽、提前关闭和失败时都不修改输入文件。
 
@@ -62,3 +62,5 @@ sources 为每路保存 generation、游标和头记录。heads 最小堆只保�
 `./mvnw test` 和 `./mvnw clean verify` 均通过，共 560 个用例、0 失败；`openspec validate --all --strict --no-interactive` 通过。
 
 后续已实现 [Manifest 的受限替换转换](manifest-compaction.md)；后台任务、请求等待和文件回收也已接入，见[自动压缩](lsm-automatic-compaction.md)及[手动请求](lsm-manual-compaction.md)。
+
+后续[独立读 context](sstable-read-context.md)允许归并与同一 Reader 的其他读取并存，归并仍只清理本次创建的游标。

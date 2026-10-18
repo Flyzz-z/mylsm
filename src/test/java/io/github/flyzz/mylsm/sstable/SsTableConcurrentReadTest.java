@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
@@ -101,15 +102,151 @@ class SsTableConcurrentReadTest {
     }
 
     @Test
-    void exclusiveCursorStillRejectsConcurrentPointLookupsAndReleasesOccupation() throws Exception {
+    void pausedCursorDoesNotBlockPointLookupsOrShareTheirPosition() throws Exception {
         try (SsTableReader reader = SsTableReader.open(table());
              var pool = Executors.newSingleThreadExecutor();
              var cursor = reader.openCursor()) {
             assertTrue(cursor.next());
-            var result = pool.submit(() -> assertThrows(IllegalStateException.class, () -> reader.get(key(1))));
-            result.get(5, TimeUnit.SECONDS);
+            var result = pool.submit(() -> reader.get(key(2)));
+            assertEquals(Optional.of(value(2)), result.get(5, TimeUnit.SECONDS));
+            assertEquals(key(1), cursor.record().key());
             cursor.close();
             assertEquals(Optional.of(value(1)), reader.get(key(1)));
+        }
+    }
+
+    @Test
+    void scanCursorAndPointLookupShareOneReaderAndOverlapTheirBlockReads() throws Exception {
+        BlockingInput input = new BlockingInput(table(), 3);
+        try (SsTableReader reader = SsTableReader.open(input);
+             var pool = Executors.newFixedThreadPool(3); AutoCloseable release = () -> input.release.countDown()) {
+            input.armed = true;
+            var scan = pool.submit(() -> {
+                var records = new ArrayList<SsTableRecord>();
+                reader.scan(records::add);
+                return records;
+            });
+            var cursor = pool.submit(() -> {
+                var records = new ArrayList<SsTableRecord>();
+                try (var context = reader.openCursor()) {
+                    while (context.next()) records.add(context.record());
+                }
+                return records;
+            });
+            var lookup = pool.submit(() -> reader.get(key(2)));
+            await(input.entered);
+            assertEquals(3, input.maxReads.get());
+            input.release.countDown();
+            List<SsTableRecord> expected = List.of(new SsTableRecord(key(1), value(1)),
+                    new SsTableRecord(key(2), value(2)));
+            assertEquals(expected, scan.get(5, TimeUnit.SECONDS));
+            assertEquals(expected, cursor.get(5, TimeUnit.SECONDS));
+            assertEquals(Optional.of(value(2)), lookup.get(5, TimeUnit.SECONDS));
+        }
+        assertEquals(1, input.closes.get());
+    }
+
+    @Test
+    void closeWaitsForAnActiveCursorStepAndInvalidatesAllPausedContexts() throws Exception {
+        BlockingInput input = new BlockingInput(table(), 1);
+        SsTableReader reader = SsTableReader.open(input);
+        try (var paused = reader.openCursor(); var untouched = reader.openCursor();
+             var pool = Executors.newFixedThreadPool(2); AutoCloseable release = () -> input.release.countDown()) {
+            assertTrue(paused.next());
+            input.armed = true;
+            var advancing = pool.submit(() -> {
+                try (var context = reader.openCursor()) {
+                    return context.next();
+                }
+            });
+            await(input.entered);
+            CountDownLatch closing = new CountDownLatch(1);
+            var closed = pool.submit(() -> { closing.countDown(); reader.close(); return null; });
+            await(closing);
+            assertThrows(TimeoutException.class, () -> closed.get(100, TimeUnit.MILLISECONDS));
+            assertEquals(0, input.closes.get());
+            input.release.countDown();
+            assertTrue(advancing.get(5, TimeUnit.SECONDS));
+            closed.get(5, TimeUnit.SECONDS); // 无须先关闭 paused/untouched。
+            assertEquals(1, input.closes.get());
+            for (var context : List.of(paused, untouched)) {
+                assertThrows(IllegalStateException.class, context::next);
+                assertThrows(IllegalStateException.class, context::record);
+            }
+        } finally {
+            input.release.countDown();
+            reader.close();
+        }
+    }
+
+    @Test
+    void oneContextIoFailureInvalidatesCachedPositionsInEveryOtherContext() throws Exception {
+        BlockingInput input = new BlockingInput(table(), 1);
+        try (SsTableReader reader = SsTableReader.open(input); var paused = reader.openCursor();
+             var pool = Executors.newSingleThreadExecutor(); AutoCloseable release = () -> input.release.countDown()) {
+            assertTrue(paused.next());
+            assertEquals(key(1), paused.record().key());
+            input.fail = true;
+            input.armed = true;
+            var failing = pool.submit(() -> {
+                try (var context = reader.openCursor()) {
+                    return context.next();
+                }
+            });
+            await(input.entered);
+            input.release.countDown();
+            var error = assertThrows(ExecutionException.class, () -> failing.get(5, TimeUnit.SECONDS));
+            assertSame(input.failure, error.getCause());
+            assertThrows(IllegalStateException.class, paused::record);
+            assertThrows(IllegalStateException.class, paused::next);
+            assertThrows(IllegalStateException.class, () -> reader.get(key(1)));
+            assertEquals(0, input.closes.get());
+        }
+        assertEquals(1, input.closes.get());
+    }
+
+    @Test
+    void callbackFailureOnlyDiscardsItsOwnContextAndLeavesAnotherCursorUnchanged() throws Exception {
+        try (SsTableReader reader = SsTableReader.open(table()); var paused = reader.openCursor()) {
+            assertTrue(paused.next());
+            var failure = new IllegalArgumentException("consumer failed");
+            assertSame(failure, assertThrows(IllegalArgumentException.class,
+                    () -> reader.scan(record -> { throw failure; })));
+            assertEquals(key(1), paused.record().key());
+            assertTrue(paused.next());
+            assertEquals(key(2), paused.record().key());
+            assertEquals(Optional.of(value(1)), reader.get(key(1)));
+        }
+    }
+
+    @Test
+    void callbackRunsOutsideReaderLockSoCloseCanCompleteWhileItIsPaused() throws Exception {
+        SsTableReader reader = SsTableReader.open(table());
+        CountDownLatch callbackEntered = new CountDownLatch(1);
+        CountDownLatch callbackRelease = new CountDownLatch(1);
+        try (var pool = Executors.newFixedThreadPool(2); AutoCloseable release = callbackRelease::countDown) {
+            var scanning = pool.submit(() -> {
+                reader.scan(record -> {
+                    callbackEntered.countDown();
+                    try {
+                        if (!callbackRelease.await(10, TimeUnit.SECONDS)) throw new AssertionError("callback timed out");
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(interrupted);
+                    }
+                });
+                return null;
+            });
+            await(callbackEntered);
+            var closing = pool.submit(() -> { reader.close(); return null; });
+            closing.get(5, TimeUnit.SECONDS); // 回调仍暂停，也能取得生命周期写锁。
+            assertFalse(scanning.isDone());
+            callbackRelease.countDown();
+            var error = assertThrows(ExecutionException.class, () -> scanning.get(5, TimeUnit.SECONDS));
+            org.junit.jupiter.api.Assertions.assertInstanceOf(IllegalStateException.class, error.getCause());
+        } finally {
+            callbackRelease.countDown();
+            reader.close();
         }
     }
 

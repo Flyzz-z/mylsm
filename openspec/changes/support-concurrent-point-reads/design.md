@@ -18,9 +18,15 @@
 
 ### Reader 并发边界
 
-Reader 自有公平读写锁。get 共享读锁，每次独立缓冲、指定偏移读取；状态为 volatile，允许并行 get 单向标记 FAILED，close 持写锁不会与读取重叠。scan、创建游标、游标每次操作和 close 持写锁；游标存活标志继续阻止 get/scan/新游标，游标由一个调用线程推进。scan 回调重入仍拒绝，锁可重入以保留原错误契约。关闭等待已开始点查，设置 CLOSED 后再释放底层资源；耗尽游标仍须显式关闭。
+Reader 自有公平读写锁，用于保护共享文件资源的生命周期；get、openCursor、Cursor.next/record 使用共享读锁，close 持独占写锁。并行读取可以单向写入 volatile FAILED，close 等读操作退出后才变为 CLOSED，避免失败覆盖关闭。
 
-相比每次新开 Reader，此方案复用索引和文件句柄。两层锁分别保护 store 读取集与 Reader 本身的公开入口；不扩展 WAL 或 MemTable 独立类的线程安全契约。
+用户进一步要求将扫描状态独立为每次读取的 context。复用现有 Cursor 类型：每个游标自己持有 records、nextBlock、recordIndex 和 closed，Reader 不再保存 scanning 或唯一 cursor。不同游标、点查和 scan 可以交错或并行；同一 Cursor 由单一调用线程使用，close 只清理其局部缓冲，不影响 Reader 和其他 context，也无须取得 Reader 锁。
+
+scan 在内部创建独立 Cursor，循环 next/record；回调执行时不持 Reader 锁，允许回调点查、创建游标或启动另一次扫描。回调异常只终止本次扫描并释放自己的 context；回调关闭 Reader 时关闭可以完成，本次扫描的下一次操作明确失败，不死锁也不伪装耗尽。
+
+Reader.close 等当前 get/next/record 操作退出，即使有暂停的游标也不等待其整个生命周期；设置 CLOSED、关闭文件，使所有已有游标后续 next/record 拒绝。暂停游标的局部缓冲由各自 close 释放，不使用全局 context 注册表或引用计数。一个 context 遇到文件错误会使共享 Reader 失效，其他 context 不能再返回缓存位置；参数或用户回调错误不导致共享失败。
+
+相比每次新开 Reader，复用索引和文件句柄；相比移除全部 Reader 锁，保留了安全关闭与读取的互斥。Merger 只拥有本次创建的游标，允许调用方保留其他独立游标；重复输入同一 Reader 的既有拒绝契约改为显式参数校验。
 
 ### flush 固定目标对象
 
@@ -41,4 +47,4 @@ close 由首个调用者负责，其他已参与关闭的调用者释放写锁�
 
 ## Migration Plan
 
-先实现 Reader 并行点查，再接入 store 读写锁与等待边界，用锁存器证明真实重叠及发布阻塞，验证重开与故障，完成学习笔记和小步提交。正式规范与归档留在阶段复盘时完成。
+先实现 Reader 并行点查及 store 读写锁与等待边界，再按用户反馈拆出独立扫描 context；用锁存器证明真实重叠及发布阻塞，验证重开与故障，完成学习笔记和小步提交。正式规范与归档留在阶段复盘时完成。

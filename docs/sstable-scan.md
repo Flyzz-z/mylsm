@@ -38,17 +38,15 @@ Reader 不预先读取后续数据块，不先把全表放进 List。索引仍�
 
 这不是“扫描失败等于从未发生”。前面回调可能已经改变了外部状态，Reader 不回滚这些副作用。Reader 本身进入 FAILED，之后只能关闭。
 
-回调自身也可能失败，例如处理第一条记录时抛出 IllegalArgumentException。这表明调用方处理失败，不能据此认定文件损坏。异常原样向上传播，scan 停止，Reader 保持 OPEN，之后仍可 get 或重新 scan。回调抛 Error 时也不将其改写为文件错误；原异常传播，扫描标志在 finally 中清除。
+回调自身也可能失败，例如处理第一条记录时抛出 IllegalArgumentException。这表明调用方处理失败，不能据此认定文件损坏。异常原样向上传播，scan 停止，Reader 保持 OPEN，之后仍可 get 或重新 scan。回调抛 Error 时也不将其改写为文件错误；原异常传播，本次扫描 context 通过 try-with-resources 关闭。
 
-实现上，只在 readBlock 周围捕获 IOException 并将 Reader 标为 FAILED，consumer.accept 放在这个 catch 范围之外。这种异常边界比“把整个 scan 包进一个 catch”更准确。
+实现上，在游标读块和点查读取时捕获 IOException 并将 Reader 标为 FAILED，consumer.accept 放在这个 catch 范围之外。这种异常边界比“把整个 scan 包进一个 catch”更准确。
 
-## 回调期间不能重入或关闭
+## 独立 context 下的回调
 
-扫描时设置实例内的 scanning 标志。get、嵌套 scan 和 close 在同一 Reader 正扫描时抛 IllegalStateException，不进行嵌套 I/O，也不改变 Reader 状态。
+当前 scan 为每次调用创建独立 Cursor，Reader 不再有全局 scanning 标志。每次 next/record 在共享生命周期读锁内完成，用户回调执行时已释放锁，因此可以点查、创建游标或启动嵌套扫描，各自位置互不影响。
 
-如果回调捕获该异常，可以继续处理；如果不捕获，就像其他回调异常一样终止本次扫描。finally 会清除标志，因此外层扫描结束后可以正常查询、重新遍历或关闭。回调仍不得修改正在读取的文件。
-
-这些限制保持单线程组件的生命周期清晰，不构成并发支持。
+回调或其他线程关闭 Reader 时可以完成关闭，本次扫描下一次读取明确拒绝，不发生锁升级死锁；回调仍不得修改正在读取的文件。回调自身异常只释放自己的 context，已有合法回调副作用不回滚。详见[独立读 context](sstable-read-context.md)。
 
 ## scan 与 get 的校验范围
 
@@ -62,7 +60,7 @@ Reader 不预先读取后续数据块，不先把全表放进 List。索引仍�
 
 ## 验证与阶段状态
 
-本步新增 18 个用例，全项目 359 个，`./mvnw test` 和 `./mvnw clean verify` 全部通过，严格 OpenSpec 验证也通过。覆盖多块二进制顺序与删除标记、空表、回调 RuntimeException/Error、不预取后续块、重入/关闭约束、首/中/尾坏块、重算 CRC 后的坏块、块最大键矛盾、跨块重叠、短读与后续读取失败，以及已关闭/失败实例的拒绝行为。
+阶段 3 完成时新增 18 个用例，全项目 359 个，`./mvnw test` 和 `./mvnw clean verify` 全部通过，严格 OpenSpec 验证也通过。覆盖多块二进制顺序与删除标记、空表、回调 RuntimeException/Error、不预取后续块、重入/关闭约束、首/中/尾坏块、重算 CRC 后的坏块、块最大键矛盾、跨块重叠、短读与后续读取失败，以及已关闭/失败实例的拒绝行为。
 
 阶段 3 已完成实现、复盘和 OpenSpec 归档：编解码、新文件构建、只读打开、三态点查和有序遍历。此组件不接入 WalStore，不提供自动冻结刷盘、多文件版本选择、文件集发布、WAL 回收或压缩。
 

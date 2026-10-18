@@ -480,15 +480,23 @@ class SsTableReaderTest {
     }
 
     @Test
-    void rejectsReentryAndCloseDuringCallbacksWithoutChangingReaderState() throws IOException {
+    void callbackCanUseIndependentPointLookupScanAndCursorWithoutChangingItsOwnPosition() throws IOException {
         RecordingInput input = new RecordingInput(sampleTable());
         try (SsTableReader reader = SsTableReader.open(input)) {
             List<SsTableRecord> produced = new ArrayList<>();
             reader.scan(record -> {
-                assertThrows(IllegalStateException.class, () -> reader.get(record.key()));
-                assertThrows(IllegalStateException.class, () -> reader.scan(ignored -> {}));
-                assertThrows(IllegalStateException.class, reader::openCursor);
-                assertThrows(IllegalStateException.class, reader::close);
+                try {
+                    assertEquals(Optional.of(record.entry()), reader.get(record.key()));
+                    List<SsTableRecord> nested = new ArrayList<>();
+                    reader.scan(nested::add);
+                    assertEquals(List.of(SAMPLE), nested);
+                    try (var cursor = reader.openCursor()) {
+                        assertTrue(cursor.next());
+                        assertEquals(record, cursor.record());
+                    }
+                } catch (IOException error) {
+                    throw new java.io.UncheckedIOException(error);
+                }
                 assertEquals(0, input.closeCalls);
                 produced.add(record);
             });
@@ -631,9 +639,11 @@ class SsTableReaderTest {
                 assertFalse(cursor.next());
                 assertFalse(cursor.next());
                 assertThrows(IllegalStateException.class, cursor::record);
-                // 即使空表已耗尽，仍须显式关闭游标后才能进行其他读操作。
-                assertThrows(IllegalStateException.class, reader::openCursor);
-                assertThrows(IllegalStateException.class, () -> reader.get(SAMPLE.key()));
+                // 耗尽只影响本 context；其他读取仍可独立进行。
+                try (var second = reader.openCursor()) {
+                    assertFalse(second.next());
+                }
+                assertEquals(Optional.empty(), reader.get(SAMPLE.key()));
             }
             assertEquals(Optional.empty(), reader.get(SAMPLE.key()));
             assertTrue(input.readOffsets.isEmpty());
@@ -696,12 +706,11 @@ class SsTableReaderTest {
     }
 
     @Test
-    void independentReadersCanPauseAndAlternateCursorAdvancement() throws IOException {
+    void contextsOnTheSameReaderCanPauseAndAlternateCursorAdvancement() throws IOException {
         Path path = threeBlockTable();
         try (SsTableReader first = SsTableReader.open(path);
-             SsTableReader second = SsTableReader.open(path);
              SsTableReader.Cursor left = first.openCursor();
-             SsTableReader.Cursor right = second.openCursor()) {
+             SsTableReader.Cursor right = first.openCursor()) {
             assertTrue(left.next());
             assertTrue(right.next());
             assertEquals(left.record(), right.record());
@@ -719,14 +728,15 @@ class SsTableReaderTest {
     }
 
     @Test
-    void earlyCursorCloseRestoresReaderAndAnOldCloseCannotReleaseANewCursor() throws IOException {
+    void earlyAndRepeatedCursorCloseDoesNotAffectOtherContextsOrReader() throws IOException {
         RecordingInput input = new RecordingInput(threeBlockTable());
         try (SsTableReader reader = SsTableReader.open(input)) {
             SsTableReader.Cursor first = reader.openCursor();
             assertTrue(first.next());
-            assertThrows(IllegalStateException.class, () -> reader.get(key(new byte[]{1})));
-            assertThrows(IllegalStateException.class, () -> reader.scan(ignored -> {}));
-            assertThrows(IllegalStateException.class, reader::openCursor);
+            assertTrue(reader.get(key(new byte[]{1})).isPresent());
+            List<SsTableRecord> parallel = new ArrayList<>();
+            reader.scan(parallel::add);
+            assertEquals(3, parallel.size());
             assertEquals(key(new byte[]{1}), first.record().key());
             first.close();
             assertEquals(0, input.closeCalls);
@@ -738,7 +748,9 @@ class SsTableReaderTest {
             assertEquals(3, rescanned.size());
             try (SsTableReader.Cursor second = reader.openCursor()) {
                 first.close();
-                assertThrows(IllegalStateException.class, reader::openCursor);
+                try (var third = reader.openCursor()) {
+                    assertTrue(third.next());
+                }
                 assertTrue(second.next());
                 assertEquals(key(new byte[]{1}), second.record().key());
             }

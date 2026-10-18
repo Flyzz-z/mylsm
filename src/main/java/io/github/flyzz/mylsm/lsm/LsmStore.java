@@ -30,14 +30,15 @@ import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 
 /**
- * 目录级存储，前台串行调用，内部一个线程串行刷盘及压缩，调用方必须独占目录。
+ * 目录级存储，支持单实例并发调用；点查共享读锁，写入及发布持写锁，调用方必须独占目录。
  * 最多一个活跃表和一个冻结表；冻结槽位忙且活跃表已满时后续写入等待。
  */
 public final class LsmStore implements AutoCloseable {
@@ -51,7 +52,9 @@ public final class LsmStore implements AutoCloseable {
     private final ManifestFile manifest;
     private final long targetBytes;
     private final int compactionThreshold;
-    private final ReentrantLock lock = new ReentrantLock();
+    private final ReentrantReadWriteLock access = new ReentrantReadWriteLock(true);
+    private final Lock lock = access.writeLock();
+    private final Lock readLock = access.readLock();
     private final Condition changed = lock.newCondition();
     private WalWriter writer;
     private MemoryTable active;
@@ -65,6 +68,8 @@ public final class LsmStore implements AutoCloseable {
     private Throwable failure;
     private Throwable backgroundFailure;
     private ManualCompaction manualCompaction; // 待处理或执行中；完成后才释放槽位。
+    private boolean closeStarted;
+    private Throwable closeFailure;
 
     private LsmStore(Path directory, ManifestFile manifest, WalWriter writer, MemoryTable active,
                      MemoryTable frozen, List<SsTableReader> tables, List<AutoCloseable> owned,
@@ -206,31 +211,50 @@ public final class LsmStore implements AutoCloseable {
 
     /** 按 active、frozen、SSTable 从新到旧查询，遇到 Tombstone 也立即停止。 */
     public Optional<Entry> get(ByteKey key) throws IOException {
-        lock.lock();
+        Optional<Entry> result = Optional.empty();
+        Throwable readFailure = null;
+        readLock.lock();
         try {
             requireOpen();
             Objects.requireNonNull(key, "key");
-            return getRecord(key);
+            try {
+                result = getRecord(key);
+            } catch (IOException | RuntimeException | Error error) {
+                readFailure = error;
+            }
         } finally {
-            lock.unlock();
+            readLock.unlock();
         }
+        if (readFailure != null) {
+            // 读锁不能升级成写锁；先退出读取，再独占登记失败并唤醒等待者。
+            lock.lock();
+            try {
+                if (state != State.CLOSED) {
+                    fail(readFailure, false);
+                }
+            } finally {
+                lock.unlock();
+            }
+            throwIfFailed(readFailure);
+        }
+        return result;
     }
 
     /**
      * 等待调用前的内存数据全部发布为 SSTable，空表不生成文件。
-     * 先等已有冻结代，再轮换并等待非空活跃代；前台仍须串行调用。
+     * 固定取得写锁时的目标代；目标发布后返回，不追逐其他调用者产生的更新代。
      * 后台失败抛 IOException；等待中断保留标志且不取消已开始的刷盘。
      */
     public void flush() throws IOException {
         lock.lock();
         try {
             requireOpen();
-            while (frozen != null) {
-                awaitFlushProgress();
-            }
-            if (active.bytes != 0) {
-                rotate();
-                while (frozen != null) {
+            MemoryTable target = active.bytes != 0 ? active : frozen == null ? null : frozen.memory();
+            while (target != null && !target.published) {
+                if (target == active && frozen == null) {
+                    rotate();
+                }
+                if (!target.published) {
                     awaitFlushProgress();
                 }
             }
@@ -242,7 +266,7 @@ public final class LsmStore implements AutoCloseable {
     /**
      * 先刷出调用前的内存数据，再交给唯一后台线程压缩并同步等待实际完成。
      * 少于两张 SSTable 时无操作；中断保留标志，不取消已提交的刷盘或压缩。
-     * 前台仍须串行调用；上次等待中断后可再次调用，不覆盖尚未完成的请求。
+     * 并发调用各自等待请求，不覆盖尚未完成者；后来的写入不保证包含在此次压缩中。
      */
     public void compact() throws IOException {
         flush();
@@ -267,28 +291,23 @@ public final class LsmStore implements AutoCloseable {
     }
 
     private Optional<Entry> getRecord(ByteKey key) throws IOException {
-        try {
-            Optional<Entry> result = active.table.get(key);
+        Optional<Entry> result = active.table.get(key);
+        if (result.isPresent()) {
+            return result;
+        }
+        if (frozen != null) {
+            result = frozen.memory().table.get(key);
             if (result.isPresent()) {
                 return result;
             }
-            if (frozen != null) {
-                result = frozen.memory().table.get(key);
-                if (result.isPresent()) {
-                    return result;
-                }
-            }
-            for (int i = tables.size() - 1; i >= 0; i--) {
-                result = tables.get(i).get(key);
-                if (result.isPresent()) {
-                    return result;
-                }
-            }
-            return Optional.empty();
-        } catch (IOException | RuntimeException | Error failure) {
-            fail(failure, false);
-            throw failure;
         }
+        for (int i = tables.size() - 1; i >= 0; i--) {
+            result = files.readTable(tables.get(i), key);
+            if (result.isPresent()) {
+                return result;
+            }
+        }
+        return Optional.empty();
     }
 
     private void appendAndApply(WalRecord record) throws IOException {
@@ -385,6 +404,15 @@ public final class LsmStore implements AutoCloseable {
             if (state == State.CLOSED) {
                 return;
             }
+            if (closeStarted) {
+                while (state != State.CLOSED) {
+                    files.beforeWait();
+                    changed.awaitUninterruptibly();
+                }
+                throwIfFailed(closeFailure);
+                return;
+            }
+            closeStarted = true;
             if (state == State.OPEN) {
                 state = State.CLOSING;
             }
@@ -407,11 +435,13 @@ public final class LsmStore implements AutoCloseable {
         Throwable failure;
         lock.lock();
         try {
-            state = State.CLOSED;
             failure = backgroundFailure == null ? null
                     : new IOException("Background SSTable work failed", backgroundFailure);
             failure = closeResources(owned, failure);
             owned = List.of();
+            closeFailure = failure;
+            state = State.CLOSED;
+            changed.signalAll();
         } finally {
             lock.unlock();
             if (interrupted) {
@@ -677,6 +707,7 @@ public final class LsmStore implements AutoCloseable {
                 tables = nextTables;
                 owned = nextOwned;
                 reader = null; // 所有权已移交；提交后的安装只做引用赋值。
+                job.memory().published = true;
                 frozen = null;
                 changed.signalAll();
             } finally {
@@ -920,6 +951,10 @@ public final class LsmStore implements AutoCloseable {
             return SsTableReader.open(path);
         }
 
+        Optional<Entry> readTable(SsTableReader reader, ByteKey key) throws IOException {
+            return reader.get(key);
+        }
+
         void append(WalWriter writer, WalRecord record) throws IOException {
             writer.append(record);
         }
@@ -928,6 +963,7 @@ public final class LsmStore implements AutoCloseable {
     private static final class MemoryTable {
         private final MemTable table = new TreeMapMemTable();
         private long bytes;
+        private boolean published; // 持存储写锁访问；固定目标 flush 的完成条件。
 
         private long bytesAfter(WalRecord record) {
             long recordBytes = encodedSize(record.key(), record.entry());

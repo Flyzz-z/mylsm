@@ -1,6 +1,6 @@
 # SSTable 第四步：打开与三态点查
 
-本笔记记录 `SsTableReader.open(Path)`、`get(ByteKey)` 和 `close()` 的实现。配合 Writer，可以写出文件后重新打开并点查；后续增加的 scan 见 [有序遍历笔记](sstable-scan.md)。WalStore 尚未接入 SSTable。
+本笔记记录 `SsTableReader.open(Path)`、`get(ByteKey)` 和 `close()` 的实现。配合 Writer，可以写出文件后重新打开并点查；后续增加的 scan 见 [有序遍历笔记](sstable-scan.md)。后续 LsmStore 已组合 SSTable，Reader 也已支持[并发点查](concurrent-point-reads.md)；WalStore 仍是独立日志入口。
 
 ## 打开只加载元信息
 

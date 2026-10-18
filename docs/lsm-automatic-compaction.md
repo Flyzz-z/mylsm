@@ -9,7 +9,7 @@
 ```java
 // directory 为已有目录；每表逻辑目标 4 MiB，自动压缩阈值 4 张。
 try (LsmStore store = LsmStore.open(directory, 4L * 1024 * 1024, 4)) {
-    // put/delete/flush 按已有前台串行约定调用。
+    // 允许多线程共享实例；写入及发布由内部写锁串行保护。
 }
 ```
 
@@ -55,7 +55,7 @@ FileOps.writeCompaction 局部适配为单次 Iterable。hasNext 缓存一次推
 
 临时 Reader 取得后立即登记 owned。正常关闭后持锁移除；关闭报错时保留引用，供 store.close() 最终释放。关闭组中一个资源失败仍尝试其他资源，清理错误保留为 suppressed。
 
-前台 get 完整持锁且不泄露 Reader。安装时旧 get 已结束，后续 get 使用新集，所以旧前台 Reader 可在安装后锁外关闭，无需通用版本引用计数。新 Manifest 已提交、独立输入及旧前台 Reader 都已完成关闭后，才尝试删除旧 SST；单个删除失败不撤销发布，也不妨碍其他删除。资源关闭错误则报告后台失败，已提交状态不回滚。
+前台 get 全程持共享读锁且不泄露 Reader，安装新文件集持独占写锁；见[并发点查](concurrent-point-reads.md)。安装时旧 get 已结束，后续 get 使用新集，所以旧前台 Reader 可在安装后锁外关闭，无需通用版本引用计数。新 Manifest 已提交、独立输入及旧前台 Reader 都已完成关闭后，才尝试删除旧 SST；单个删除失败不撤销发布，也不妨碍其他删除。资源关闭错误则报告后台失败，已提交状态不回滚。
 
 打开、读取、构建、关闭或提交失败会停止服务并唤醒背压等待者，后续操作和 close 报错。提交结果不确定时保留新旧文件，重开按有效 Manifest 恢复。若前台已失败，后台即使构建成功也不提交新状态。
 

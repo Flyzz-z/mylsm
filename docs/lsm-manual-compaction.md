@@ -5,7 +5,7 @@
 ```java
 try (LsmStore store = LsmStore.open(directory)) {
     store.put(key, value);
-    store.compact(); // 成功后，调用前的数据全部位于唯一有效 SSTable。
+    store.compact(); // 无其他并发写入时，调用前的数据全部位于唯一有效 SSTable。
 }
 ```
 
@@ -15,7 +15,7 @@ try (LsmStore store = LsmStore.open(directory)) {
 
 ```text
 调用线程                                  唯一后台线程
-flush：等已有 frozen，再刷出非空 active  →   处理 frozen 并发布
+flush：固定目标代，等待它及更早代发布  →   处理 frozen 并发布
 持锁登记 ManualCompaction
 changed.signalAll()                    →   在任务边界检查请求
 while (!request.done) await()               标记 started，固定全部输入
@@ -34,12 +34,12 @@ while (!request.done) await()               标记 started，固定全部输入
 ## 中断、失败与关闭
 
 - 等待中断抛 `InterruptedIOException` 并恢复中断标志；已提交的刷盘或压缩继续执行。若中断发生在初始 flush 等待中，尚未登记手动请求。
-- 中断后再次调用，先 flush，再等待旧请求释放槽位，然后登记新请求；不会覆盖仍执行或待处理的请求。前台仍按原约定串行调用。
+- 中断后再次调用，先 flush，再等待旧请求释放槽位，然后登记新请求；不会覆盖仍执行或待处理的请求。多个调用者各自等待对应请求，槽位忙时先等待释放。
 - 后台构建、打开、关闭或提交失败进入 FAILED，保存原因并唤醒请求等待者。手动调用抛 `IOException`，cause 保留原错误；后续操作拒绝，close 仍报告后台失败。
 - 提交后关闭旧 Reader 失败也不能返回成功，已提交文件集不回滚。旧文件删除失败沿用孤儿策略，不撤销成功。
 - close 拒绝新请求，将尚未开始的请求明确标记失败；已开始的手动任务安全执行到结束，close join 后才释放资源。
 
-成功只说明此次全量整理完成；前台 API 的串行约定未扩展为通用并发支持。文件发布、恢复和资源所有权复用[自动压缩](lsm-automatic-compaction.md)的协议，没有新增磁盘格式。
+成功只说明此次全量整理完成；当前支持[单实例并发调用](concurrent-point-reads.md)，后来的写入可能产生新内存代或已发布表，返回瞬间不保证全库只有一张表。文件发布、恢复和资源所有权复用[自动压缩](lsm-automatic-compaction.md)的协议，没有新增磁盘格式。
 
 ## 验证
 

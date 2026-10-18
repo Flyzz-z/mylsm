@@ -1,6 +1,6 @@
 # 目录恢复与基础 LSM 读写
 
-本篇记录 LsmStore.open/get/put/delete/close 的基础读写与目录恢复。后续已接入日志轮换、阈值背压、一个后台线程和显式 flush，见 [后台刷盘笔记](lsm-background-flush.md)。
+本篇记录 LsmStore.open/get/put/delete/close 的基础读写与目录恢复。后续已接入日志轮换、阈值背压、一个后台线程和显式 flush，见 [后台刷盘笔记](lsm-background-flush.md)。当前另已接入[单实例并发点查](concurrent-point-reads.md)，本文保留目录恢复的原有数据流。
 
 ## 打开数据库的数据流
 

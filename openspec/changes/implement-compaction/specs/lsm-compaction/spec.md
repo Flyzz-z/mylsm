@@ -16,6 +16,10 @@
 - **WHEN** 压缩已开始且前台产生 frozen
 - **THEN** 不并行启动 flush，压缩结束后优先处理 frozen，活跃表达到容量限制时继续遵守已有写入背压
 
+#### Scenario: Explicit flush does not wait for automatic compaction
+- **WHEN** 显式刷盘已成功发布调用前的数据，并使有效表数达到自动压缩阈值
+- **THEN** 刷盘可以返回，不要求等待随后自动压缩完成；后台继续按同一条件判断并执行压缩
+
 ### Requirement: Wait for manual background compaction
 
 存储 SHALL 提供同步手动压缩入口，先等待调用前的全部内存数据发布，再提交后台请求并等待完成。请求被取走 SHALL 不视为完成；任务成功发布、因少于两张表而无操作结束、或失败时 SHALL 登记结果并通知等待者。前台 SHALL 继续串行调用，等待时 SHALL 释放工作线程所需的锁；等待中断 SHALL 保留中断信息并报告错误，不取消已经提交的任务。

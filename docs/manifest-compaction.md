@@ -1,6 +1,6 @@
 # Manifest 全量压缩替换
 
-这是 compaction 阶段的第三个实现小步：在[游标](sstable-cursor.md)和[多路归并](sstable-merge.md)之后，让 Manifest 能声明“一张输出完整替换全部输入”。本步只实现元信息转换与追加/恢复验证，尚未将 LsmStore 的后台工作线程接入压缩，也不构建或删除 SST 文件。
+这是 compaction 阶段的第三个实现小步：在[游标](sstable-cursor.md)和[多路归并](sstable-merge.md)之后，让 Manifest 能声明“一张输出完整替换全部输入”。本步只实现元信息转换与追加/恢复验证；后续已接入 [LsmStore 阈值自动后台压缩](lsm-automatic-compaction.md)，负责构建、发布和回收真实 SST 文件。
 
 ## 一次提交只改变 SSTable 集合
 
@@ -67,4 +67,4 @@ ManifestFile 没有新增另一套写盘协议：继续先校验转换、编码�
 
 `./mvnw test` 和 `./mvnw clean verify` 均通过，共 577 个用例、0 失败；`openspec validate --all --strict --no-interactive` 通过。
 
-这些用例只验证 Manifest 本身，不代表后台压缩已接入，也不替代后续独立 JVM 在真实归并和文件回收过程中的退出测试。下一步再接入后台归并构建和文件集发布。
+这些用例只验证 Manifest 本身；后续已接入[自动后台压缩](lsm-automatic-compaction.md)，并通过独立 JVM 在真实归并、提交和文件回收边界的退出恢复测试。

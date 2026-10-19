@@ -10,6 +10,8 @@
 
 已接入[读写锁并发点查](docs/concurrent-point-reads.md)：多个线程可共享一个 LsmStore，get 并行执行，Reader 以[独立读 context](docs/sstable-read-context.md)支持多个游标与扫描，写入和发布串行；flush 固定目标代，compact 和 close 协调并发等待者。慢查询仍会阻塞写入与发布。该独立阶段已完成[复盘](docs/concurrency-review.md)与归档，正式规范见 [lsm-store](openspec/specs/lsm-store/spec.md) 和 [sstable](openspec/specs/sstable/spec.md)，阶段记录见[设计](openspec/changes/archive/2026-10-18-support-concurrent-point-reads/design.md)和[任务](openspec/changes/archive/2026-10-18-support-concurrent-point-reads/tasks.md)；当前仍要求单实例独占目录。
 
+进行中的跳表阶段已完成[节点、查找和写入核心](docs/skip-list-memtable.md)，当前实现保持包内可见；删除与快照待后续小步骤完成。进度见 [change 任务](openspec/changes/implement-skip-list-memtable/tasks.md)。
+
 ## 环境与构建
 
 - JDK 21（构建会检查主版本，不启用 preview 特性）

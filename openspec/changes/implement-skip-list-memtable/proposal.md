@@ -7,7 +7,7 @@
 - 增加 SkipListMemTable，复用 ByteKey、Entry、Value 和 Tombstone。
 - 分小步实现节点、查找、插入覆盖、删除标记与稳定有序快照。
 - 复用 MemTable 契约测试，以可控高度和 TreeMap 对照验证跳表。
-- 本次先完成节点、查询、插入和覆盖；尚未满足完整契约前保持包内可见，不实现 MemTable 接口，也不接入存储引擎。
+- 先完成节点、查询、插入和覆盖，再按用户指挥的小步骤实现删除与快照；尚未满足完整契约前保持包内可见，不实现 MemTable 接口，也不接入存储引擎。
 - 非目标：物理删除、并发跳表、MVCC、范围游标、性能基准及自动切换 LsmStore/WalStore 的实现。
 
 ## Capabilities

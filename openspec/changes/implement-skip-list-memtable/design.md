@@ -20,11 +20,13 @@
 - delete 通过统一 upsert 写 Tombstone.INSTANCE；本阶段无需物理删除及层高回缩。
 - snapshot 遍历第 0 层，新建 MemTableRecord 后返回 List.copyOf；共享不可变键和记录，禁止暴露可变 Node。
 
-### 当前实现小步骤
+### 分步实现
 
 先实现 Node、head、height、size、put/get 和内部 upsert。查找从高层向右再向下；插入用 update[] 保存各层前驱，get 不分配此数组。新高度超出当前高度时，对应前驱补为 head。先检查参数和生成高度的合法性，再修改表。
 
 为避免用未完成方法冒充契约实现，当前类保持包内可见，不声明 implements MemTable，也不放置 UnsupportedOperationException 占位方法；后续完成 delete/snapshot 后再公开并实现接口。这是开发中的过渡状态，不是第二套对外 API。
+
+读写核心完成后，第二小步仅实现 delete：校验 key 后复用 upsert 保存 Tombstone.INSTANCE。已有键和重复删除不修改高度或指针；不存在键依然插入标记。快照仍留待后续实现。
 
 包内构造器接受 IntSupplier 作为高度生成器，测试能指定 1 至 32 层的形状，不暴露节点。非法高度在修改状态前抛 IllegalArgumentException；覆盖写入不消费高度。默认构造器按抛硬币生成高度。
 
@@ -32,7 +34,7 @@
 
 当前验证：空表、未命中位置、乱序插入、全单层和最高层插入、不同层高之间下降、内容相同的键覆盖、前缀及无符号排序、null 与非法高度失败后状态不变。使用固定种子的混合 put/get 与 TreeMapMemTable 对照，不依赖时间阈值或随机概率来判断通过。
 
-后续步骤再复用完整 MemTable 契约测试，覆盖 tombstone 与稳定快照。本次完成一个小步骤后说明代码和验证结果，留出讨论空间，不自动一次性完成阶段。
+删除小步骤验证已有键、不存在键、重复删除、删除后重写与错误输入；固定种子对照增加删除操作。后续快照步骤再复用完整 MemTable 契约测试。每个小步骤完成后说明代码和验证结果，留出讨论空间，不自动一次性完成阶段。
 
 ## Risks / Trade-offs
 

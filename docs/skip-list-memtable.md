@@ -1,6 +1,6 @@
-# 跳表 MemTable：节点、查找与写入
+# 跳表 MemTable：节点、查找、写入与删除标记
 
-当前完成的是跳表的第一个实现小步骤：`SkipListMemTable` 的节点、多层查找、新键插入和已有键覆盖。类暂时保持包内可见；删除和快照尚未实现，因此还没有声明 `implements MemTable`。当前 `WalStore` 和 `LsmStore` 仍使用 `TreeMapMemTable`。
+当前已完成 `SkipListMemTable` 的节点、多层查找、新键插入、已有键覆盖和删除标记。类暂时保持包内可见；快照尚未实现，因此还没有声明 `implements MemTable`。当前 `WalStore` 和 `LsmStore` 仍使用 `TreeMapMemTable`。
 
 ## 节点与层数
 
@@ -47,10 +47,24 @@ update[level].next[level] = node
 
 正常随机分布及适当规模下，查找和写入的期望时间为 O(log n)，最坏为 O(n)。固定层数也不能为无限增长的规模保证对数性能。随机性影响效率，不影响数据语义。
 
-本步测试覆盖各插入位置、命中与未命中、相等键覆盖、空键值、前缀与高位字节、null 拒绝和非法高度失败后的继续写入。固定种子的读写操作与 `TreeMapMemTable` 对照，确认不同结构保持相同查询结果，不用时间阈值判断性能。
+测试覆盖各插入位置、命中与未命中、相等键覆盖、空键值、前缀与高位字节、null 拒绝和非法高度失败后的继续写入。固定种子的读写删除操作与 `TreeMapMemTable` 对照，确认不同结构保持相同查询结果，不用时间阈值判断性能。
 
-本步验证通过：新增测试 16 个用例；`./mvnw test` 和 `./mvnw clean verify` 均运行 654 个用例，零失败、零错误、零跳过；`openspec validate --all --strict --no-interactive` 全部通过。
+首次读写核心验证通过：新增测试 16 个用例；`./mvnw test` 和 `./mvnw clean verify` 均运行 654 个用例，零失败、零错误、零跳过；`openspec validate --all --strict --no-interactive` 全部通过。
+
+## 删除标记如何复用插入路径
+
+`delete(key)` 先拒绝 null，再调用 `upsert(key, Tombstone.INSTANCE)`。它不调用物理摘除节点的逻辑。
+
+- key 已存在：只把 entry 替换为 tombstone，原高度、指针和 size 均不变；重复删除也是同一路径，不生成新高度。
+- key 不存在：按新键插入路径创建节点，size 增加一次。即使没有本地旧值，也要保留删除记录，才能遮蔽更旧存储层中的值。
+- 删除后重新 put：把同一节点的 tombstone 替换为 Value，无需重建节点。空字节 Value 仍是正常值。
+
+因此查询有三个可观察结果：`Optional.of(Value)` 是值，`Optional.of(Tombstone.INSTANCE)` 是明确删除，`Optional.empty()` 才是当前表未找到。删除成功后不能返回 empty。
+
+本步增加对单层、双层和最高层节点的删除验证，检查相邻键不受影响、未存在键和空键也保留标记、重复删除不生成新节点高度、删除后重写恢复值，以及 null 或非法生成高度失败后状态不变。随机对照测试加入删除操作。
+
+删除小步骤验证通过：新增 6 个测试用例，跳表测试共 22 个用例；`./mvnw test` 与 `./mvnw clean verify` 均运行 660 个用例，零失败、零错误、零跳过；OpenSpec 严格校验通过。
 
 ## 后续小步骤
 
-`delete` 将调用内部 `upsert` 保存 `Tombstone.INSTANCE`，不会物理摘除节点。快照将遍历底层，创建独立的 `MemTableRecord` 配对，保持旧快照不受节点记录替换影响。两者完成后，再公开实现 `MemTable` 并复用完整契约测试。
+快照将遍历底层，创建独立的 `MemTableRecord` 配对，保持旧快照不受节点记录替换影响。快照完成后，再公开实现 `MemTable` 并复用完整契约测试。

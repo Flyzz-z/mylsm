@@ -2,6 +2,7 @@ package io.github.flyzz.mylsm.memtable;
 
 import io.github.flyzz.mylsm.model.ByteKey;
 import io.github.flyzz.mylsm.model.Entry;
+import io.github.flyzz.mylsm.model.Tombstone;
 import io.github.flyzz.mylsm.model.Value;
 
 import java.util.Objects;
@@ -11,7 +12,7 @@ import java.util.function.IntSupplier;
 
 /**
  * 跳表内存表的读写核心，非线程安全。
- * 当前仅在包内使用；后续完成删除与快照后再实现完整 MemTable 契约。
+ * 当前仅在包内使用；后续完成快照后再实现完整 MemTable 契约。
  */
 final class SkipListMemTable {
     private static final int MAX_HEIGHT = 32;
@@ -34,6 +35,12 @@ final class SkipListMemTable {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
         upsert(key, value);
+    }
+
+    /** 保存删除标记，包括尚不存在的键；已有节点保留其高度与指针。 */
+    void delete(ByteKey key) {
+        Objects.requireNonNull(key, "key");
+        upsert(key, Tombstone.INSTANCE);
     }
 
     Optional<Entry> get(ByteKey key) {

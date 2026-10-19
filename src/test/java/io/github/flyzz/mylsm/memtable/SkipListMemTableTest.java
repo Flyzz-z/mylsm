@@ -1,6 +1,7 @@
 package io.github.flyzz.mylsm.memtable;
 
 import io.github.flyzz.mylsm.model.ByteKey;
+import io.github.flyzz.mylsm.model.Tombstone;
 import io.github.flyzz.mylsm.model.Value;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -14,7 +15,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** 当前只验收读写核心；完整 MemTable 契约在删除与快照完成后复用。 */
+/** 当前验收读写与删除标记；完整 MemTable 契约在快照完成后复用。 */
 class SkipListMemTableTest {
     @Test
     void emptyReadsDoNotGenerateHeights() {
@@ -80,6 +81,72 @@ class SkipListMemTableTest {
         assertEquals(1, generated.get());
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2, 32})
+    void deletingExistingKeysRetainsMarkersWithoutGeneratingNewHeights(int height) {
+        var generated = new AtomicInteger();
+        var table = new SkipListMemTable(() -> {
+            generated.incrementAndGet();
+            return height;
+        });
+        table.put(key(5), value(5));
+        table.put(key(12), value(12));
+        table.put(key(20), value(20));
+
+        // 依次删除中间、头部和尾部节点，每次删除仍能定位其他键。
+        table.delete(key(12));
+        assertEquals(Optional.of(Tombstone.INSTANCE), table.get(key(12)));
+        assertEquals(Optional.of(value(5)), table.get(key(5)));
+        assertEquals(Optional.of(value(20)), table.get(key(20)));
+        table.delete(key(5));
+        table.delete(key(20));
+        table.delete(key(12));
+
+        for (int deleted : new int[]{5, 12, 20}) {
+            assertEquals(Optional.of(Tombstone.INSTANCE), table.get(key(deleted)));
+        }
+        assertEquals(Optional.empty(), table.get(key(13)));
+        assertEquals(3, generated.get(), "Deleting existing keys must reuse their nodes");
+    }
+
+    @Test
+    void deletingAbsentKeysIncludingEmptyKeyInsertsPersistentMarkers() {
+        var generated = new AtomicInteger();
+        var table = new SkipListMemTable(() -> {
+            generated.incrementAndGet();
+            return 32;
+        });
+        ByteKey emptyKey = ByteKey.copyOf(new byte[0]);
+
+        table.delete(key(7));
+        table.delete(emptyKey);
+        table.delete(key(7));
+        table.delete(ByteKey.copyOf(new byte[0]));
+
+        assertEquals(Optional.of(Tombstone.INSTANCE), table.get(key(7)));
+        assertEquals(Optional.of(Tombstone.INSTANCE), table.get(emptyKey));
+        assertEquals(Optional.empty(), table.get(key(8)));
+        assertEquals(2, generated.get());
+    }
+
+    @Test
+    void putAfterDeletionRestoresValueInTheSameNode() {
+        var generated = new AtomicInteger();
+        var table = new SkipListMemTable(() -> {
+            assertEquals(0, generated.getAndIncrement(), "Only the first delete inserts a node");
+            return 3;
+        });
+
+        table.delete(key(12));
+        table.put(key(12), value(99));
+        assertEquals(Optional.of(value(99)), table.get(key(12)));
+        table.delete(key(12));
+        assertEquals(Optional.of(Tombstone.INSTANCE), table.get(key(12)));
+        table.put(key(12), Value.copyOf(new byte[0]));
+        assertEquals(Optional.of(Value.copyOf(new byte[0])), table.get(key(12)));
+        assertEquals(1, generated.get());
+    }
+
     @Test
     void supportsEmptyPrefixAndUnsignedByteKeys() {
         var generated = new AtomicInteger();
@@ -112,6 +179,7 @@ class SkipListMemTableTest {
         assertThrows(NullPointerException.class, () -> table.put(key(1), null));
         assertThrows(NullPointerException.class, () -> table.put(key(2), null));
         assertThrows(NullPointerException.class, () -> table.get(null));
+        assertThrows(NullPointerException.class, () -> table.delete(null));
         assertThrows(NullPointerException.class, () -> new SkipListMemTable(null));
 
         assertEquals(1, generated.get());
@@ -139,9 +207,28 @@ class SkipListMemTableTest {
         assertEquals(Optional.of(value(10)), table.get(key(10)));
     }
 
+    @Test
+    void invalidHeightOnDeleteDoesNotPublishMarkerOrChangeOtherKeys() {
+        var generated = new AtomicInteger();
+        var table = new SkipListMemTable(() -> switch (generated.getAndIncrement()) {
+            case 0 -> 32;
+            case 1 -> 33;
+            default -> 1;
+        });
+        table.put(key(10), value(10));
+
+        assertThrows(IllegalArgumentException.class, () -> table.delete(key(5)));
+        assertEquals(Optional.empty(), table.get(key(5)));
+        assertEquals(Optional.of(value(10)), table.get(key(10)));
+
+        table.delete(key(5));
+        assertEquals(Optional.of(Tombstone.INSTANCE), table.get(key(5)));
+        assertEquals(Optional.of(value(10)), table.get(key(10)));
+    }
+
     @ParameterizedTest
     @ValueSource(longs = {1, 42, 8675309})
-    void matchesTreeMapForDeterministicMixedReadsAndWrites(long seed) {
+    void matchesTreeMapForDeterministicMixedReadsWritesAndDeletes(long seed) {
         var operations = new Random(seed);
         var levels = new Random(seed ^ 0x5deece66dL);
         var table = new SkipListMemTable(() -> {
@@ -161,12 +248,16 @@ class SkipListMemTableTest {
 
         for (int step = 0; step < 1000; step++) {
             ByteKey next = keys.get(operations.nextInt(keys.size()));
-            if (operations.nextBoolean()) {
+            int operation = operations.nextInt(3);
+            if (operation == 0) {
                 byte[] bytes = new byte[operations.nextInt(8)];
                 operations.nextBytes(bytes);
                 Value value = Value.copyOf(bytes);
                 table.put(next, value);
                 reference.put(next, value);
+            } else if (operation == 1) {
+                table.delete(next);
+                reference.delete(next);
             }
             assertEquals(reference.get(next), table.get(next), "seed=" + seed + ", step=" + step);
         }

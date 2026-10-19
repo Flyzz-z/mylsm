@@ -22,4 +22,4 @@
 
 ## Impact
 
-新增 memtable 包内实现、JUnit 测试与学习笔记，不增加依赖，不修改持久化格式。TreeMapMemTable 保留作为对照和当前存储引擎实现；接入存储引擎另行讨论。
+新增 memtable 实现、JUnit 测试与学习笔记，不增加依赖，不修改持久化格式。完整实现后公开默认构造器并实现 MemTable；可控高度入口仅包内可见。TreeMapMemTable 保留作为对照和当前存储引擎实现；接入存储引擎另行讨论。

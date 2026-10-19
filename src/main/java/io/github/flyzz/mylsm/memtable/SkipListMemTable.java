@@ -5,16 +5,15 @@ import io.github.flyzz.mylsm.model.Entry;
 import io.github.flyzz.mylsm.model.Tombstone;
 import io.github.flyzz.mylsm.model.Value;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.IntSupplier;
 
-/**
- * 跳表内存表的读写核心，非线程安全。
- * 当前仅在包内使用；后续完成快照后再实现完整 MemTable 契约。
- */
-final class SkipListMemTable {
+/** 基于 ByteKey 自然顺序的跳表内存表；非线程安全，访问须由调用方协调。 */
+public final class SkipListMemTable implements MemTable {
     private static final int MAX_HEIGHT = 32;
 
     private final Node head = new Node(null, null, MAX_HEIGHT);
@@ -22,7 +21,7 @@ final class SkipListMemTable {
     private int height = 1;
     private int size;
 
-    SkipListMemTable() {
+    public SkipListMemTable() {
         this(SkipListMemTable::randomHeight);
     }
 
@@ -31,25 +30,38 @@ final class SkipListMemTable {
         this.heightSupplier = Objects.requireNonNull(heightSupplier, "heightSupplier");
     }
 
-    void put(ByteKey key, Value value) {
+    @Override
+    public void put(ByteKey key, Value value) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(value, "value");
         upsert(key, value);
     }
 
     /** 保存删除标记，包括尚不存在的键；已有节点保留其高度与指针。 */
-    void delete(ByteKey key) {
+    @Override
+    public void delete(ByteKey key) {
         Objects.requireNonNull(key, "key");
         upsert(key, Tombstone.INSTANCE);
     }
 
-    Optional<Entry> get(ByteKey key) {
+    @Override
+    public Optional<Entry> get(ByteKey key) {
         Objects.requireNonNull(key, "key");
         Node candidate = findPredecessor(key, null).next[0];
         if (candidate != null && candidate.key.compareTo(key) == 0) {
             return Optional.of(candidate.entry);
         }
         return Optional.empty();
+    }
+
+    @Override
+    public List<MemTableRecord> snapshot() {
+        var records = new ArrayList<MemTableRecord>(size);
+        for (Node node = head.next[0]; node != null; node = node.next[0]) {
+            // 固定此刻的键与记录配对，不把可变节点留在快照中。
+            records.add(new MemTableRecord(node.key, node.entry));
+        }
+        return List.copyOf(records);
     }
 
     private void upsert(ByteKey key, Entry entry) {

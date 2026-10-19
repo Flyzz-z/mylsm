@@ -10,7 +10,7 @@
 
 已接入[读写锁并发点查](docs/concurrent-point-reads.md)：多个线程可共享一个 LsmStore，get 并行执行，Reader 以[独立读 context](docs/sstable-read-context.md)支持多个游标与扫描，写入和发布串行；flush 固定目标代，compact 和 close 协调并发等待者。慢查询仍会阻塞写入与发布。该独立阶段已完成[复盘](docs/concurrency-review.md)与归档，正式规范见 [lsm-store](openspec/specs/lsm-store/spec.md) 和 [sstable](openspec/specs/sstable/spec.md)，阶段记录见[设计](openspec/changes/archive/2026-10-18-support-concurrent-point-reads/design.md)和[任务](openspec/changes/archive/2026-10-18-support-concurrent-point-reads/tasks.md)；当前仍要求单实例独占目录。
 
-进行中的跳表阶段已完成[节点、查找、写入和删除标记](docs/skip-list-memtable.md)，当前实现保持包内可见；快照待后续小步骤完成。进度见 [change 任务](openspec/changes/implement-skip-list-memtable/tasks.md)。
+跳表阶段已完成[查找、写入、删除标记和稳定有序快照](docs/skip-list-memtable.md)，`SkipListMemTable` 已公开实现完整 `MemTable` 接口，通过相同契约测试。正式规范见 [skip-list-memtable](openspec/specs/skip-list-memtable/spec.md)，阶段记录见[归档任务](openspec/changes/archive/2026-10-19-implement-skip-list-memtable/tasks.md)。存储引擎当前仍使用 `TreeMapMemTable`。
 
 ## 环境与构建
 
@@ -34,7 +34,7 @@ openspec validate --all --strict --no-interactive
 ```text
 src/main/java/io/github/flyzz/mylsm/
   model/                             ByteKey、Entry、Value、Tombstone
-  memtable/                          MemTable、TreeMapMemTable、MemTableRecord
+  memtable/                          MemTable、TreeMapMemTable、SkipListMemTable、MemTableRecord
   wal/                               WAL 编解码、同步追加与恢复修复、WalStore
   sstable/                           SSTable 编解码、文件构建、点查、遍历与流式归并
   lsm/                               Manifest、LsmStore 恢复、读写、后台刷盘与压缩

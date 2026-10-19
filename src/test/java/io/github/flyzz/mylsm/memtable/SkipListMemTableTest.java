@@ -15,8 +15,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** 当前验收读写与删除标记；完整 MemTable 契约在快照完成后复用。 */
-class SkipListMemTableTest {
+/** 复用完整 MemTable 契约，并验证跳表各层形状与确定性操作序列。 */
+class SkipListMemTableTest extends MemTableContractTest {
+    @Override
+    protected MemTable createMemTable() {
+        return new SkipListMemTable();
+    }
+
     @Test
     void emptyReadsDoNotGenerateHeights() {
         var table = new SkipListMemTable(() -> {
@@ -24,6 +29,7 @@ class SkipListMemTableTest {
         });
 
         assertEquals(Optional.empty(), table.get(key(1)));
+        assertEquals(List.of(), table.snapshot());
         assertEquals(Optional.empty(), table.get(ByteKey.copyOf(new byte[0])));
         assertEquals(Optional.empty(), table.get(key(1)));
     }
@@ -37,6 +43,7 @@ class SkipListMemTableTest {
         for (int next : new int[]{18, 5, 25, 2, 12, 20, 9, 17}) {
             table.put(key(next), value(next));
             reference.put(key(next), value(next));
+            assertEquals(reference.snapshot(), table.snapshot());
             // 每次插入后验证全部命中和头部、间隙、尾部未命中。
             for (int query = 0; query <= 27; query++) {
                 assertEquals(reference.get(key(query)), table.get(key(query)),
@@ -55,6 +62,7 @@ class SkipListMemTableTest {
         for (int next : new int[]{12, 5, 25, 18, 2, 20, 9, 17}) {
             table.put(key(next), value(next));
             reference.put(key(next), value(next));
+            assertEquals(reference.snapshot(), table.snapshot());
             for (int query = 0; query <= 27; query++) {
                 assertEquals(reference.get(key(query)), table.get(key(query)),
                         "inserted=" + next + ", query=" + query);
@@ -228,7 +236,7 @@ class SkipListMemTableTest {
 
     @ParameterizedTest
     @ValueSource(longs = {1, 42, 8675309})
-    void matchesTreeMapForDeterministicMixedReadsWritesAndDeletes(long seed) {
+    void matchesTreeMapForDeterministicOperationsAndStableSnapshots(long seed) {
         var operations = new Random(seed);
         var levels = new Random(seed ^ 0x5deece66dL);
         var table = new SkipListMemTable(() -> {
@@ -239,6 +247,8 @@ class SkipListMemTableTest {
             return height;
         });
         var reference = new TreeMapMemTable();
+        var savedSnapshots = new ArrayList<List<MemTableRecord>>();
+        var expectedSnapshots = new ArrayList<List<MemTableRecord>>();
         var keys = new ArrayList<ByteKey>();
         keys.add(ByteKey.copyOf(new byte[0]));
         for (int i = 0; i < 128; i++) {
@@ -260,7 +270,17 @@ class SkipListMemTableTest {
                 reference.delete(next);
             }
             assertEquals(reference.get(next), table.get(next), "seed=" + seed + ", step=" + step);
+            if (step % 50 == 0) {
+                var snapshot = table.snapshot();
+                var expected = reference.snapshot();
+                assertEquals(expected, snapshot, "seed=" + seed + ", step=" + step);
+                savedSnapshots.add(snapshot);
+                expectedSnapshots.add(expected);
+            }
         }
+        assertEquals(reference.snapshot(), table.snapshot());
+        // 后续插入、覆盖、删除和重写均不得改变之前保存的快照。
+        assertEquals(expectedSnapshots, savedSnapshots);
         for (ByteKey key : keys) {
             assertEquals(reference.get(key), table.get(key));
         }
